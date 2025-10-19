@@ -322,10 +322,15 @@ class SchedulePage:
                 start_time = pd.to_datetime(row['FirstStartTime']).strftime('%H:%M:%S')
                 st.markdown(f"**First Started:** {start_time}")
             
-            if pd.notna(row.get('WorkSessions')) and row['WorkSessions'] != '[]':
+            '''if pd.notna(row.get('WorkSessions')) and row['WorkSessions'] != '[]':
                 with st.expander("📝 Work Sessions"):
                     sessions_text = UIComponents.format_work_sessions(row['WorkSessions'])
-                    st.text(sessions_text)
+                    st.text(sessions_text)'''
+            if pd.notna(row.get('WorkSessions')) and row['WorkSessions'] != '[]':
+                st.markdown("**📝 Work Sessions:**")
+                sessions_text = UIComponents.format_work_sessions(row['WorkSessions'])
+                st.text(sessions_text)
+
         
         with col2:
             st.markdown(f"**Planned:** {row['Routing Time (min)']} min")

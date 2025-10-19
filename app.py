@@ -234,7 +234,7 @@ def render_technicians_page():
     
     # Add, Modify, Delete sections
     st.info("💡 Copy your full manage_technicians() function code here from your old app.py")
-    st.markdown()
+    st.markdown("### Add / Modify / Delete Technicians")
     with st.expander("Add a Technician"):
         col1, col2 = st.columns(2)
         with col1:

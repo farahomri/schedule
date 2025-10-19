@@ -27,15 +27,21 @@ class Reclamation:
             "QS": self.QS,
         }
 
+import os
+
 def load_reclamations(file_path):
-    try:
-        df = pd.read_excel(file_path)
-        df.columns = df.columns.str.strip()  # Remove any leading or trailing spaces from column names
-        print("Column names:", df.columns.tolist())  # Debugging: Print column names
-        reclamations = [Reclamation(**row) for index, row in df.iterrows()]
-        return reclamations
-    except FileNotFoundError:
+    if not file_path or not os.path.exists(file_path):
+        print(f"⚠️ File not found or invalid path: {file_path}")
         return []
+    try:
+        df = pd.read_excel(file_path, engine='openpyxl')
+        df.columns = df.columns.str.strip()
+        reclamations = [Reclamation(**row) for _, row in df.iterrows()]
+        return reclamations
+    except Exception as e:
+        print(f"Error reading reclamations file: {e}")
+        return []
+
 
 
 def save_reclamations(file_path, reclamations):
