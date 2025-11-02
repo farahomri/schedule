@@ -21,7 +21,9 @@ class ScheduleService:
         df = df.copy()
         df['ScheduleRowID'] = [ScheduleService.create_schedule_row_id() for _ in range(len(df))]
         df['Status'] = 'Planned'
-        df['Priority'] = range(1, len(df) + 1)
+        if 'Priority' not in df.columns:
+            df['Priority'] = None  # If no priority exists
+        df['SequenceNumber'] = range(1, len(df) + 1)  
         
         # Time tracking columns for multiple sessions
         df['FirstStartTime'] = None

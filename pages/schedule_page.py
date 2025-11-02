@@ -141,17 +141,16 @@ class SchedulePage:
                 st.rerun()
             else:
                 st.error(f"❌ {message}")
-    
     @staticmethod
     def _render_priority_change(planned_orders: pd.DataFrame):
         """Render priority change interface"""
-        st.markdown("**Change Order Priority**")
+        st.markdown("**Change Order Priority (A/B/C)**")
         
         col1, col2 = st.columns(2)
         
         with col1:
             order_options = {
-                f"{row['Order ID']} - Priority: {row.get('Priority', 'N/A')}": row['ScheduleRowID']
+                f"{row['Order ID']} - Current Priority: {row.get('Priority', 'None')}": row['ScheduleRowID']
                 for _, row in planned_orders.iterrows()
             }
             
@@ -167,26 +166,64 @@ class SchedulePage:
             selected_order_id = order_options[selected_order]
         
         with col2:
-            new_priority = st.number_input(
-                "New Priority (1 = highest)",
-                min_value=1,
-                max_value=len(planned_orders),
-                value=1,
-                key="new_priority_input"
+            # ✅ CHANGED: Dropdown instead of number input
+            new_priority = st.selectbox(
+                "New Priority",
+                options=['A', 'B', 'C', 'None'],
+                index=0,  # Default to 'A'
+                key="new_priority_select",
+                help="A = Highest priority, B = Medium, C = Low, None = No priority"
             )
         
         if st.button("🔢 Update Priority", key="btn_update_priority"):
             df = SessionManager.get('initial_schedule_df')
-            updated_df, success, message = ScheduleService.change_priority(
-                df, selected_order_id, new_priority
-            )
             
-            if success:
-                SessionManager.set('initial_schedule_df', updated_df)
-                st.success(f"✅ {message}")
-                st.rerun()
-            else:
-                st.error(f"❌ {message}")
+            # Find the order
+            row_mask = df['ScheduleRowID'] == selected_order_id
+            if not row_mask.any():
+                st.error("❌ Order not found")
+                return
+            
+            row_idx = df[row_mask].index[0]
+            
+            # Check if order can be edited
+            if df.at[row_idx, "Status"] != "Planned":
+                st.error("❌ Can only change priority for Planned orders")
+                return
+            
+            # Store old priority for message
+            old_priority = df.at[row_idx, "Priority"]
+            
+            # ✅ UPDATE PRIORITY (A/B/C or None)
+            new_priority_value = None if new_priority == 'None' else new_priority
+            df.at[row_idx, "Priority"] = new_priority_value
+            
+            # ✅ RE-SORT ENTIRE SCHEDULE BY PRIORITY
+            # Create temporary numeric priority for sorting
+            priority_mapping = {'A': 1, 'B': 2, 'C': 3}
+            df['_temp_priority_num'] = df['Priority'].map(priority_mapping)
+            df['_temp_priority_num'] = df['_temp_priority_num'].fillna(999)  # None = 999 (last)
+            
+            # Sort by priority, then by routing time (descending)
+            df = df.sort_values(
+                by=['_temp_priority_num', 'Routing Time (min)'], 
+                ascending=[True, False]
+            ).reset_index(drop=True)
+            
+            # Update sequence numbers
+            df['SequenceNumber'] = range(1, len(df) + 1)
+            
+            # Remove temporary column
+            df = df.drop('_temp_priority_num', axis=1)
+            
+            # Save back to session
+            SessionManager.set('initial_schedule_df', df)
+            
+            st.success(f"✅ Priority changed from '{old_priority}' to '{new_priority_value}'")
+            st.success(f"📊 Schedule re-sorted. Order is now at position #{df.at[row_idx, 'SequenceNumber']}")
+            st.rerun()
+    
+
     
     @staticmethod
     def _render_time_modification(planned_orders: pd.DataFrame):
@@ -301,9 +338,19 @@ class SchedulePage:
             return
         
         for idx, row in filtered_df.iterrows():
+            priority_display = ""
+            priority_value = row.get('Priority', None)
+            if priority_value == 'A' or priority_value == 1:
+                priority_display = "🔴 Priority A"
+            elif priority_value == 'B' or priority_value == 2:
+                priority_display = "🟡 Priority B"
+            elif priority_value == 'C' or priority_value == 3:
+                priority_display = "🟢 Priority C"
+            else:
+                priority_display = "⚪ No Priority"
+
             with st.expander(
-                f"{'⭐' * min(int(row.get('Priority', 0)), 3) if row.get('Priority', 0) > 0 else ''} "
-                f"Order {row['Order ID']} - {row['SAP']} | {row['Technician Name']}",
+                f"{priority_display} | Order {row['Order ID']} - {row['SAP']} | {row['Technician Name']}",
                 expanded=False
             ):
                 SchedulePage._render_order_card(row)
@@ -313,25 +360,29 @@ class SchedulePage:
         """Render individual order card"""
         col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
         
+        # Column 1: Order Details
         with col1:
             st.markdown(f"**Material:** {row['Material Description']}")
             st.markdown(f"**Technician:** {row['Technician Name']}")
-            st.markdown(f"**Priority:** {row.get('Priority', 'N/A')}")
+            
+            # Display Priority (A/B/C)
+            priority_value = row.get('Priority', None)
+            if priority_value:
+                st.markdown(f"**Priority:** {priority_value}")
+            else:
+                st.markdown(f"**Priority:** No Priority")
             
             if pd.notnull(row.get('FirstStartTime')):
                 start_time = pd.to_datetime(row['FirstStartTime']).strftime('%H:%M:%S')
                 st.markdown(f"**First Started:** {start_time}")
             
-            '''if pd.notna(row.get('WorkSessions')) and row['WorkSessions'] != '[]':
+            # Display work sessions
+            if pd.notna(row.get('WorkSessions')) and row['WorkSessions'] != '[]':
                 with st.expander("📝 Work Sessions"):
                     sessions_text = UIComponents.format_work_sessions(row['WorkSessions'])
-                    st.text(sessions_text)'''
-            if pd.notna(row.get('WorkSessions')) and row['WorkSessions'] != '[]':
-                st.markdown("**📝 Work Sessions:**")
-                sessions_text = UIComponents.format_work_sessions(row['WorkSessions'])
-                st.text(sessions_text)
-
+                    st.text(sessions_text)
         
+        # Column 2: Time Information
         with col2:
             st.markdown(f"**Planned:** {row['Routing Time (min)']} min")
             
@@ -343,6 +394,7 @@ class SchedulePage:
             if pd.notnull(row.get('RemainingRoutingTime')):
                 st.markdown(f"**Remaining:** {row['RemainingRoutingTime']:.1f} min")
         
+        # Column 3: Status
         with col3:
             st.markdown(f"**Status:**")
             st.markdown(UIComponents.status_badge(row['Status']), unsafe_allow_html=True)
@@ -350,8 +402,10 @@ class SchedulePage:
             if row.get('Remark'):
                 st.markdown(f"**Remark:** {row['Remark']}")
         
+        # Column 4: Action Buttons
         with col4:
             SchedulePage._render_action_buttons(row)
+    
     
     @staticmethod
     def _render_action_buttons(row: pd.Series):
