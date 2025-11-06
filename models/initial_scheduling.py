@@ -60,13 +60,13 @@ def calculate_working_time(technicians_path, shifts_df):
     return result
 def create_initial_schedule(technicians_df, orders_df):
     """
-    Create schedule with IMPROVED THREE-PHASE BALANCING:
+    Create schedule with THREE-PHASE BALANCING:
     Phase 1: Assign ONE order to each technician (round-robin)
-    Phase 2: Continue assigning remaining orders, prioritizing least-loaded technicians
-    Phase 3: Fill remaining capacity - keep assigning until technicians are full
+    Phase 2: Continue with priority orders, balanced assignment
+    Phase 3: Fill remaining capacity until technicians are full
     """
     
-    # Handle priority
+    # ===== PRIORITY HANDLING =====
     priority_mapping = {
         'Urgent': 0, 'urgent': 0, '0': 0,
         'A': 1, 'a': 1,
@@ -77,11 +77,25 @@ def create_initial_schedule(technicians_df, orders_df):
     if 'Priority' not in orders_df.columns:
         orders_df['Priority'] = None
     
+    # Clean and convert priority
     orders_df['Priority'] = orders_df['Priority'].fillna('None').astype(str).str.strip()
-    orders_df['Priority_Num'] = orders_df['Priority'].map(priority_mapping).fillna(999).astype(int)
+    orders_df['Priority_Num'] = orders_df['Priority'].map(priority_mapping)
+    orders_df['Priority_Num'] = orders_df['Priority_Num'].fillna(999).astype(int)
     
-    # Sort orders by Priority and routing time
-    orders_df = orders_df.sort_values(by=['Priority_Num', 'routing time'], ascending=[True, False]).copy()
+    # ✅ CRITICAL: Sort orders by Priority FIRST, then by routing time
+    orders_df = orders_df.sort_values(
+        by=['Priority_Num', 'routing time'], 
+        ascending=[True, False]  # Priority ascending (0=Urgent first), time descending (longer first)
+    ).reset_index(drop=True).copy()
+    
+    print("\n" + "="*80)
+    print("ORDER PRIORITY SORTING")
+    print("="*80)
+    priority_counts = orders_df.groupby('Priority').size()
+    for priority, count in priority_counts.items():
+        if priority != 'None':
+            print(f"Priority {priority}: {count} orders")
+    print("="*80)
     
     technicians_df = technicians_df.copy()
     
@@ -97,28 +111,28 @@ def create_initial_schedule(technicians_df, orders_df):
     
     scheduled_order_indices = set()
 
+    # ========== PHASE 1: ROUND-ROBIN ==========
     print("\n" + "="*80)
-    print("PHASE 1: ROUND-ROBIN - Ensure everyone gets at least one order")
+    print("PHASE 1: ROUND-ROBIN - ONE order per technician")
     print("="*80)
 
-    # ========== PHASE 1: ROUND-ROBIN ASSIGNMENT ==========
     tech_list = list(technician_working_time.keys())
-    tech_index = 0
-    phase1_count = 0
-    max_phase1_orders = len(tech_list)
+    technicians_assigned_phase1 = set()
     
+    # Go through orders and assign ONE to each technician
     for order_idx, order in orders_df.iterrows():
         if order_idx in scheduled_order_indices:
             continue
         
-        if phase1_count >= max_phase1_orders:
+        # Stop Phase 1 when all technicians have at least one order
+        if len(technicians_assigned_phase1) >= len(tech_list):
             break
         
-        assigned = False
-        attempts = 0
-        
-        while attempts < len(tech_list) and not assigned:
-            tech_matricule = tech_list[tech_index]
+        # Try to find a technician who hasn't been assigned yet
+        for tech_matricule in tech_list:
+            if tech_matricule in technicians_assigned_phase1:
+                continue  # This technician already has an order
+            
             tech_expertise_level = technician_expertise.get(tech_matricule, 0)
             tech_time_left = technician_working_time[tech_matricule]
             
@@ -149,146 +163,150 @@ def create_initial_schedule(technicians_df, orders_df):
                 technician_working_time[tech_matricule] -= order['routing time']
                 technician_assigned_time[tech_matricule] += order['routing time']
                 scheduled_order_indices.add(order_idx)
-                assigned = True
-                phase1_count += 1
+                technicians_assigned_phase1.add(tech_matricule)
                 
-                print(f"✓ ROUND-ROBIN: Order {order['Order ID']} → {technician_names.get(tech_matricule)} (Order #{phase1_count}/{max_phase1_orders})")
-            
-            tech_index = (tech_index + 1) % len(tech_list)
-            attempts += 1
-        
-        if not assigned:
-            print(f"⚠ Could not assign order {order['Order ID']} in round-robin")
+                print(f"✓ Order {order['Order ID']} (Priority: {order.get('Priority', 'None')}, {order['routing time']}min) → {technician_names.get(tech_matricule)}")
+                break
 
-    print(f"\nPhase 1 Complete: {phase1_count} orders assigned")
+    print(f"\nPhase 1 Complete: {len(technicians_assigned_phase1)} technicians assigned, {len(scheduled_order_indices)} orders scheduled")
 
-    # ========== PHASE 2: BALANCED ASSIGNMENT BY EXPERTISE ==========
+    # ========== PHASE 2: BALANCED ASSIGNMENT BY PRIORITY & EXPERTISE ==========
     print("\n" + "="*80)
-    print("PHASE 2: BALANCED ASSIGNMENT - Assign to least-loaded qualified technicians")
+    print("PHASE 2: BALANCED - Assign remaining orders respecting priority")
     print("="*80)
 
-    remaining_orders = orders_df[~orders_df.index.isin(scheduled_order_indices)].copy()
+    # Get remaining orders (maintain priority order!)
+    remaining_orders_phase2 = orders_df[~orders_df.index.isin(scheduled_order_indices)].copy()
     phase2_count = 0
     
-    for order_idx, order in remaining_orders.iterrows():
-        assigned = False
+    for order_idx, order in remaining_orders_phase2.iterrows():
+        # Find qualified technicians with time
+        available_technicians = []
         
-        # Find qualified technicians with available time, sort by least loaded
-        available_technicians = [
-            (mat, time_left, technician_assigned_time[mat])
-            for mat, time_left in technician_working_time.items()
-            if time_left > 0 
-            and technician_expertise.get(mat) >= order['Class Code']
-            and time_left >= order['routing time']
-        ]
+        for mat in technician_working_time.keys():
+            tech_time_left = technician_working_time[mat]
+            tech_expertise_level = technician_expertise.get(mat, 0)
+            
+            # Check if technician can do this order
+            can_do = tech_expertise_level >= order['Class Code']
+            has_time = tech_time_left >= order['routing time']
+            
+            if can_do and has_time:
+                available_technicians.append((
+                    mat,
+                    tech_time_left,
+                    technician_assigned_time[mat],
+                    tech_expertise_level
+                ))
         
-        # Sort by: 1) Least assigned time, 2) Prefer exact expertise match, 3) Most# Sort by: 1) Least assigned time, 2) Prefer exact expertise match, 3) Most available time
+        if not available_technicians:
+            continue  # Skip this order, will be unscheduled
+        
+        # Sort by: 1) Least assigned time (balance), 2) Exact expertise match, 3) Most available
         available_technicians.sort(key=lambda x: (
-            x[2],  # Least assigned time first
-            -(technician_expertise.get(x[0], 0) == order['Class Code']),  # Prefer exact match
+            x[2],  # Least assigned time
+            -(x[3] == order['Class Code']),  # Prefer exact match
             -x[1]  # Most available time
         ))
         
-        for tech_matricule, tech_time_left, assigned_time in available_technicians:
-            schedule.append({
-                'Day/Date': current_date,
-                'SAP': order['SAP'],
-                'Order ID': order['Order ID'],
-                'Material Description': order['Material Description'],
-                'Routing Time (min)': order['routing time'],
-                'Technician Matricule': tech_matricule,
-                'Technician Name': technician_names.get(tech_matricule, 'Unknown'),
-                'Status': 'Planned',
-                'Remaining Time': order['routing time'],
-                'Remark': '',
-                'Priority': order['Priority'] if order['Priority'] != 'None' else None,
-                'Class Code': order['Class Code'],
-                'StartTime': None,
-                'StopTime': None,
-                'EndTime': None,
-                'RealSpentTime': None,
-                'RemainingRoutingTime': order['routing time']
-            })
-            
-            technician_working_time[tech_matricule] -= order['routing time']
-            technician_assigned_time[tech_matricule] += order['routing time']
-            scheduled_order_indices.add(order_idx)
-            assigned = True
-            phase2_count += 1
-            
-            utilization = (technician_assigned_time[tech_matricule] / technician_initial_time[tech_matricule]) * 100
-            print(f"✓ Order {order['Order ID']} ({order['routing time']}min) → {technician_names.get(tech_matricule)} [{utilization:.0f}%]")
-            break
+        # Assign to best technician
+        tech_matricule = available_technicians[0][0]
         
-        if not assigned:
-            print(f"✗ Order {order['Order ID']} could not be scheduled (no qualified tech with enough time)")
+        schedule.append({
+            'Day/Date': current_date,
+            'SAP': order['SAP'],
+            'Order ID': order['Order ID'],
+            'Material Description': order['Material Description'],
+            'Routing Time (min)': order['routing time'],
+            'Technician Matricule': tech_matricule,
+            'Technician Name': technician_names.get(tech_matricule, 'Unknown'),
+            'Status': 'Planned',
+            'Remaining Time': order['routing time'],
+            'Remark': '',
+            'Priority': order['Priority'] if order['Priority'] != 'None' else None,
+            'Class Code': order['Class Code'],
+            'StartTime': None,
+            'StopTime': None,
+            'EndTime': None,
+            'RealSpentTime': None,
+            'RemainingRoutingTime': order['routing time']
+        })
+        
+        technician_working_time[tech_matricule] -= order['routing time']
+        technician_assigned_time[tech_matricule] += order['routing time']
+        scheduled_order_indices.add(order_idx)
+        phase2_count += 1
+        
+        utilization = (technician_assigned_time[tech_matricule] / technician_initial_time[tech_matricule]) * 100
+        print(f"✓ Order {order['Order ID']} (Priority: {order.get('Priority', 'None')}, {order['routing time']}min) → {technician_names.get(tech_matricule)} [{utilization:.0f}%]")
 
     print(f"\nPhase 2 Complete: {phase2_count} orders assigned")
 
-    # ========== PHASE 3: FILL REMAINING CAPACITY ==========
+    # ========== PHASE 3: FILL CAPACITY ==========
     print("\n" + "="*80)
-    print("PHASE 3: CAPACITY FILLING - Assign remaining orders to technicians with free time")
+    print("PHASE 3: CAPACITY FILL - Use remaining technician time")
     print("="*80)
 
     remaining_orders_phase3 = orders_df[~orders_df.index.isin(scheduled_order_indices)].copy()
     phase3_count = 0
     
-    # Continue until no more orders can be assigned
     for order_idx, order in remaining_orders_phase3.iterrows():
-        assigned = False
+        # Find ANY technician with time (ignore expertise for capacity filling)
+        available_technicians = []
         
-        # Find ANY technician with available time (ignore expertise for capacity filling)
-        available_technicians = [
-            (mat, time_left, technician_assigned_time[mat])
-            for mat, time_left in technician_working_time.items()
-            if time_left >= order['routing time']
-        ]
+        for mat in technician_working_time.keys():
+            tech_time_left = technician_working_time[mat]
+            
+            if tech_time_left >= order['routing time']:
+                available_technicians.append((
+                    mat,
+                    tech_time_left,
+                    technician_assigned_time[mat]
+                ))
         
-        # Sort by least loaded
+        if not available_technicians:
+            continue
+        
+        # Sort by least assigned
         available_technicians.sort(key=lambda x: (x[2], -x[1]))
+        tech_matricule = available_technicians[0][0]
         
-        for tech_matricule, tech_time_left, assigned_time in available_technicians:
-            schedule.append({
-                'Day/Date': current_date,
-                'SAP': order['SAP'],
-                'Order ID': order['Order ID'],
-                'Material Description': order['Material Description'],
-                'Routing Time (min)': order['routing time'],
-                'Technician Matricule': tech_matricule,
-                'Technician Name': technician_names.get(tech_matricule, 'Unknown'),
-                'Status': 'Planned',
-                'Remaining Time': order['routing time'],
-                'Remark': '',
-                'Priority': order['Priority'] if order['Priority'] != 'None' else None,
-                'Class Code': order['Class Code'],
-                'StartTime': None,
-                'StopTime': None,
-                'EndTime': None,
-                'RealSpentTime': None,
-                'RemainingRoutingTime': order['routing time']
-            })
-            
-            technician_working_time[tech_matricule] -= order['routing time']
-            technician_assigned_time[tech_matricule] += order['routing time']
-            scheduled_order_indices.add(order_idx)
-            assigned = True
-            phase3_count += 1
-            
-            utilization = (technician_assigned_time[tech_matricule] / technician_initial_time[tech_matricule]) * 100
-            print(f"✓ Order {order['Order ID']} ({order['routing time']}min) → {technician_names.get(tech_matricule)} [{utilization:.0f}%] (Capacity fill)")
-            break
+        schedule.append({
+            'Day/Date': current_date,
+            'SAP': order['SAP'],
+            'Order ID': order['Order ID'],
+            'Material Description': order['Material Description'],
+            'Routing Time (min)': order['routing time'],
+            'Technician Matricule': tech_matricule,
+            'Technician Name': technician_names.get(tech_matricule, 'Unknown'),
+            'Status': 'Planned',
+            'Remaining Time': order['routing time'],
+            'Remark': 'Capacity fill - may not match expertise',
+            'Priority': order['Priority'] if order['Priority'] != 'None' else None,
+            'Class Code': order['Class Code'],
+            'StartTime': None,
+            'StopTime': None,
+            'EndTime': None,
+            'RealSpentTime': None,
+            'RemainingRoutingTime': order['routing time']
+        })
         
-        if not assigned:
-            print(f"✗ Order {order['Order ID']} - No technician has sufficient time remaining")
+        technician_working_time[tech_matricule] -= order['routing time']
+        technician_assigned_time[tech_matricule] += order['routing time']
+        scheduled_order_indices.add(order_idx)
+        phase3_count += 1
+        
+        utilization = (technician_assigned_time[tech_matricule] / technician_initial_time[tech_matricule]) * 100
+        print(f"✓ Order {order['Order ID']} ({order['routing time']}min) → {technician_names.get(tech_matricule)} [{utilization:.0f}%] (Capacity fill)")
 
     print(f"\nPhase 3 Complete: {phase3_count} orders assigned")
 
     # ========== FINAL SUMMARY ==========
     print("\n" + "="*80)
-    print("WORKLOAD DISTRIBUTION SUMMARY")
+    print("FINAL WORKLOAD DISTRIBUTION")
     print("="*80)
     
-    total_scheduled = phase1_count + phase2_count + phase3_count
+    total_scheduled = len(scheduled_order_indices)
     total_orders = len(orders_df)
     
     print(f"Total Orders: {total_orders}")
@@ -309,7 +327,8 @@ def create_initial_schedule(technicians_df, orders_df):
         filled = int((assigned / total) * bar_length) if total > 0 else 0
         bar = "█" * filled + "░" * (bar_length - filled)
         
-        print(f"{name:20} [{bar}] {utilization:5.1f}% ({order_count:2d} orders, {assigned:4.0f}/{total:4.0f}min, {remaining:4.0f}min free)")
+        status = "FULL" if remaining < 30 else "Available"
+        print(f"{name:20} [{bar}] {utilization:5.1f}% ({order_count:2d} orders, {assigned:4.0f}/{total:4.0f}min) {status}")
     
     print("="*80)
 
@@ -319,7 +338,10 @@ def create_initial_schedule(technicians_df, orders_df):
     if not schedule_df.empty:
         schedule_df['Priority'] = schedule_df['Priority'].replace('None', None)
 
+    print(f"\n✅ Schedule created: {len(schedule_df)} orders scheduled, {len(unscheduled_orders_df)} unscheduled\n")
+
     return schedule_df, technicians_df, unscheduled_orders_df
+
 '''def create_initial_schedule(technicians_df, orders_df):
     priority_mapping = {'A': 1, 'B': 2, 'C': 3}
     orders_df['Priority_Num'] = orders_df['Priority'].replace(priority_mapping).infer_objects(copy=False)

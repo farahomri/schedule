@@ -657,7 +657,7 @@ class SchedulePage:
         )
     @staticmethod
     def _render_unscheduled_orders():
-        """Render unscheduled orders management section"""
+        """Render unscheduled orders with detailed technician availability like urgent priority"""
         st.markdown("### 📦 Unscheduled Orders")
         
         unscheduled_df = SessionManager.get('unscheduled_orders_df')
@@ -668,98 +668,190 @@ class SchedulePage:
         
         st.warning(f"⚠️ {len(unscheduled_df)} orders could not be automatically scheduled")
         
-        with st.expander("📋 View & Assign Unscheduled Orders", expanded=True):
-            st.markdown("**These orders need manual assignment:**")
+        with st.expander("📋 View & Manually Assign Unscheduled Orders", expanded=True):
+            st.markdown("**Orders needing manual assignment:**")
             
-            # Display unscheduled orders table
-            display_cols = ['Order ID', 'SAP', 'Material Description', 'routing time', 'Class', 'Priority']
+            # Display unscheduled orders
+            display_cols = ['Order ID', 'SAP', 'Material Description', 'routing time', 'Class', 'Class Code', 'Priority']
             available_cols = [col for col in display_cols if col in unscheduled_df.columns]
             st.dataframe(unscheduled_df[available_cols], use_container_width=True, hide_index=True)
             
             st.markdown("---")
-            st.markdown("#### 🎯 Manually Assign Unscheduled Order")
+            st.markdown("#### 🎯 Manually Assign Order")
             
-            col1, col2 = st.columns(2)
+            col1, col2 = st.columns([1, 1])
             
             with col1:
+                st.markdown("**1️⃣ Select Order**")
+                
                 # Select unscheduled order
                 order_options = {
-                    f"{row['Order ID']} - {row['SAP']} ({row['routing time']}min, {row.get('Class', 'N/A')})": idx
+                    f"{row['Order ID']} - {row['SAP']} ({row['routing time']}min, Level {row.get('Class Code', '?')})": idx
                     for idx, row in unscheduled_df.iterrows()
                 }
                 
                 selected_order_display = st.selectbox(
-                    "Select Order to Assign",
+                    "Choose Order",
                     list(order_options.keys()),
                     key="unscheduled_order_select"
                 )
                 selected_order_idx = order_options[selected_order_display]
                 selected_order = unscheduled_df.loc[selected_order_idx]
+                
+                # Show order details
+                st.info(f"""
+                **Order Details:**
+                - Routing Time: {selected_order['routing time']} min
+                - Complexity: Level {selected_order.get('Class Code', '?')}
+                - Priority: {selected_order.get('Priority', 'None')}
+                """)
             
             with col2:
-                # Get working technicians with REAL available time
+                st.markdown("**2️⃣ View Technician Availability**")
+                
+                # Get working technicians with REAL-TIME availability
                 working_techs = SessionManager.get('working_technicians')
                 schedule_df = SessionManager.get('initial_schedule_df')
                 
-                if working_techs is not None and schedule_df is not None:
-                    if isinstance(working_techs, pd.DataFrame):
-                        tech_list = working_techs.to_dict('records')
-                    else:
-                        tech_list = working_techs
-                    
-                    # Calculate REAL available time (Total - Planned orders)
-                    tech_options_list = []
-                    for tech in tech_list:
-                        matricule = tech['Matricule']
-                        name = tech['Technician Name']
-                        total_time = tech.get('Working Time', 0)
-                        expertise = tech.get('Expertise Class', 0)
-                        
-                        # Calculate allocated time (ONLY Planned orders)
-                        allocated = schedule_df[
-                            (schedule_df['Technician Matricule'] == matricule) & 
-                            (schedule_df['Status'] == 'Planned')
-                        ]['Routing Time (min)'].sum()
-                        
-                        available = total_time - allocated
-                        
-                        # Check if qualified
-                        order_class = selected_order.get('Class Code', 1)
-                        qualified = expertise >= order_class
-                        
-                        # Check if has enough time
-                        has_time = available >= selected_order['routing time']
-                        
-                        if qualified and has_time:
-                            tech_options_list.append({
-                                'display': f"{name} - {available:.0f} min available (Level {expertise})",
-                                'matricule': matricule,
-                                'name': name,
-                                'expertise': expertise,
-                                'available': available
-                            })
-                    
-                    # Sort by most available time
-                    tech_options_list.sort(key=lambda x: x['available'], reverse=True)
-                    
-                    if tech_options_list:
-                        tech_options = {t['display']: (t['matricule'], t['name'], t['expertise']) for t in tech_options_list}
-                        
-                        selected_tech_display = st.selectbox(
-                            "Assign to Technician",
-                            list(tech_options.keys()),
-                            key="unscheduled_tech_select"
-                        )
-                        selected_tech = tech_options[selected_tech_display]
-                    else:
-                        st.error("❌ No qualified technicians with available time for this order")
-                        return
-                else:
+                if working_techs is None or schedule_df is None:
                     st.error("❌ Technician data not available")
                     return
+                
+                # Convert to list
+                if isinstance(working_techs, pd.DataFrame):
+                    tech_list = working_techs.to_dict('records')
+                else:
+                    tech_list = working_techs
+            
+            # Build detailed technician availability table
+            st.markdown("---")
+            st.markdown("#### 👷 Technician Real-Time Availability")
+            st.info("💡 Available time shows REAL free time (Total - Planned orders)")
+            
+            tech_availability = []
+            for tech in tech_list:
+                matricule = tech['Matricule']
+                name = tech['Technician Name']
+                total_time = tech.get('Working Time', 0)
+                expertise = tech.get('Expertise Class', 0)
+                
+                # Calculate allocated time (ONLY Planned orders)
+                allocated = schedule_df[
+                    (schedule_df['Technician Matricule'] == matricule) & 
+                    (schedule_df['Status'] == 'Planned')
+                ]['Routing Time (min)'].sum()
+                
+                # Real available time
+                available = total_time - allocated
+                utilization = (allocated / total_time * 100) if total_time > 0 else 0
+                
+                # Count orders
+                planned_count = len(schedule_df[
+                    (schedule_df['Technician Matricule'] == matricule) & 
+                    (schedule_df['Status'] == 'Planned')
+                ])
+                
+                in_progress_count = len(schedule_df[
+                    (schedule_df['Technician Matricule'] == matricule) & 
+                    (schedule_df['Status'] == 'In Progress')
+                ])
+                
+                # Check qualification
+                order_class = selected_order.get('Class Code', 1)
+                qualified = "✅ Yes" if expertise >= order_class else "❌ No"
+                
+                # Check if has enough time for this order
+                can_fit = available >= selected_order['routing time']
+                
+                # Determine status
+                if can_fit and expertise >= order_class:
+                    status = "🟢 Available & Qualified"
+                elif can_fit:
+                    status = "🟡 Available (Low Expertise)"
+                elif available > 0:
+                    status = "🟠 Insufficient Time"
+                else:
+                    status = "🔴 Fully Booked"
+                
+                tech_availability.append({
+                    'Matricule': matricule,
+                    'Name': name,
+                    'Expertise': f"Level {expertise}",
+                    'Qualified': qualified,
+                    'Status': status,
+                    'Available Time': f"{available:.0f} min",
+                    'Utilization': f"{utilization:.0f}%",
+                    'Planned Orders': planned_count,
+                    'In Progress': in_progress_count,
+                    'Can Fit Order': "✅ Yes" if can_fit else "❌ No",
+                    'available_num': available,
+                    'expertise_num': expertise,
+                    'can_fit': can_fit
+                })
+            
+            # Sort by: 1) Can fit order, 2) Qualified, 3) Most available
+            tech_availability.sort(key=lambda x: (-x['can_fit'], -(x['expertise_num'] >= selected_order.get('Class Code', 1)), -x['available_num']))
+            
+            # Display table
+            display_df = pd.DataFrame([
+                {
+                    'Technician': t['Name'],
+                    'Expertise': t['Expertise'],
+                    'Qualified': t['Qualified'],
+                    'Status': t['Status'],
+                    'Available': t['Available Time'],
+                    'Utilization': t['Utilization'],
+                    'Planned': t['Planned Orders'],
+                    'In Progress': t['In Progress'],
+                    'Can Fit': t['Can Fit Order']
+                }
+                for t in tech_availability
+            ])
+            
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            
+            # Technician selection
+            st.markdown("#### 🎯 Select Technician to Assign")
+            
+            # Filter to technicians who can fit the order
+            can_fit_techs = [t for t in tech_availability if t['can_fit']]
+            
+            if not can_fit_techs:
+                st.error("❌ No technicians have enough available time for this order")
+                st.info(f"💡 Order requires {selected_order['routing time']} minutes. All technicians are fully allocated.")
+                return
+            
+            # Create options
+            tech_options = {}
+            for t in can_fit_techs:
+                display_text = f"{t['Name']} - {t['Status']} - {t['Available Time']} free ({t['Expertise']})"
+                tech_options[display_text] = (t['Matricule'], t['Name'], t['expertise_num'])
+            
+            selected_tech_display = st.selectbox(
+                "Choose Technician",
+                list(tech_options.keys()),
+                key="unscheduled_tech_select",
+                help="Showing only technicians with sufficient available time"
+            )
+            selected_tech = tech_options[selected_tech_display]
+            
+            # Show selection summary
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.metric("Order Requires", f"Level {selected_order.get('Class Code', 1)}")
+            with col_b:
+                st.metric("Selected Tech Level", f"Level {selected_tech[2]}")
+            
+            # Qualification warning
+            if selected_tech[2] < selected_order.get('Class Code', 1):
+                st.warning(f"⚠️ Selected technician (Level {selected_tech[2]}) may not be fully qualified for this order (requires Level {selected_order.get('Class Code', 1)})")
+            else:
+                st.success(f"✅ Selected technician is qualified for this order")
             
             # Assign button
-            if st.button("✅ Assign Order to Technician", type="primary", use_container_width=True):
+            if st.button("✅ Assign Order to Selected Technician", type="primary", use_container_width=True, key="btn_assign_unscheduled"):
+                import uuid
+                
                 # Add order to schedule
                 schedule_df = SessionManager.get('initial_schedule_df')
                 unscheduled_df = SessionManager.get('unscheduled_orders_df')
@@ -774,7 +866,7 @@ class SchedulePage:
                     'Technician Name': selected_tech[1],
                     'Status': 'Planned',
                     'Remaining Time': selected_order['routing time'],
-                    'Remark': 'Manually assigned from unscheduled',
+                    'Remark': 'Manually assigned from unscheduled orders',
                     'Priority': selected_order.get('Priority', None),
                     'Class Code': selected_order.get('Class Code', 1),
                     'ScheduleRowID': str(uuid.uuid4()),
@@ -787,7 +879,6 @@ class SchedulePage:
                 }
                 
                 # Add to schedule
-                import uuid
                 schedule_df = pd.concat([schedule_df, pd.DataFrame([new_order])], ignore_index=True)
                 
                 # Remove from unscheduled
