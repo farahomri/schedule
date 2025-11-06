@@ -891,3 +891,4 @@ class SchedulePage:
                 st.success(f"✅ Order {selected_order['Order ID']} assigned to {selected_tech[1]}")
                 st.balloons()
                 st.rerun()
+
