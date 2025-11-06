@@ -349,9 +349,8 @@ class SchedulePage:
         
         # Update button
         button_text = "🚨 Set URGENT & Assign" if new_priority in ['Urgent', '0'] else "🔢 Update Priority"
-        
         if st.button(button_text, key="btn_update_priority", type="primary", use_container_width=True):
-            df = SessionManager.get('initial_schedule_df')
+            df = SessionManager.get('initial_schedule_df').copy()  # ✅ Make a copy
             
             row_mask = df['ScheduleRowID'] == selected_order_id
             if not row_mask.any():
@@ -368,24 +367,38 @@ class SchedulePage:
             old_priority = df.at[row_idx, "Priority"]
             old_technician = df.at[row_idx, "Technician Name"]
             
-            # Update priority
+            # ✅ FIX: Validate urgent assignment has technician selected
             if new_priority in ['Urgent', '0']:
+                if selected_technician is None:
+                    st.error("❌ Please select a technician for urgent priority")
+                    return
                 new_priority_value = 'Urgent'
             elif new_priority == 'None':
                 new_priority_value = None
             else:
                 new_priority_value = new_priority
             
-            df.at[row_idx, "Priority"] = new_priority_value
-            
+            # ✅ FIX: Convert priority to string consistently
+            df.at[row_idx, "Priority"] = str(new_priority_value) if new_priority_value is not None else None
+
             # Update technician if urgent
             if new_priority in ['Urgent', '0'] and selected_technician:
                 df.at[row_idx, "Technician Matricule"] = selected_technician[0]
                 df.at[row_idx, "Technician Name"] = selected_technician[1]
-            
-            # Re-sort
-            priority_mapping = {'Urgent': 0, '0': 0, 'A': 1, 'B': 2, 'C': 3}
-            df['_temp_priority'] = df['Priority'].map(priority_mapping).fillna(999)
+
+            # ✅ FIX: Re-sort with proper priority mapping
+            priority_mapping = {
+                'Urgent': 0, 'urgent': 0, '0': 0,
+                'A': 1, 'a': 1,
+                'B': 2, 'b': 2,
+                'C': 3, 'c': 3,
+                'None': 999, None: 999
+            }
+
+            # Convert Priority to string for mapping
+            df['Priority'] = df['Priority'].astype(str).str.strip()
+            df['_temp_priority'] = df['Priority'].map(priority_mapping).fillna(999).astype(int)
+
             df = df.sort_values(
                 by=['_temp_priority', 'Routing Time (min)'], 
                 ascending=[True, False]
@@ -561,10 +574,12 @@ class SchedulePage:
                 st.markdown(f"**First Started:** {start_time}")
             
             # Display work sessions
+            # Display work sessions (NO EXPANDER - just show directly)
             if pd.notna(row.get('WorkSessions')) and row['WorkSessions'] != '[]':
-                with st.expander("📝 Work Sessions"):
-                    sessions_text = UIComponents.format_work_sessions(row['WorkSessions'])
-                    st.text(sessions_text)
+                st.markdown("**📝 Work Sessions:**")
+                sessions_text = UIComponents.format_work_sessions(row['WorkSessions'])
+                st.text(sessions_text)
+
         
         # Column 2: Time Information
         with col2:
@@ -600,7 +615,6 @@ class SchedulePage:
         if status == "Planned":
             if st.button("▶️ Start", key=f"start_{schedule_row_id}"):
                 SchedulePage._handle_status_action(schedule_row_id, "start")
-        
         elif status == "In Progress":
             col_a, col_b = st.columns(2)
             with col_a:
@@ -609,19 +623,22 @@ class SchedulePage:
             with col_b:
                 if st.button("✅ End", key=f"end_{schedule_row_id}"):
                     SchedulePage._handle_status_action(schedule_row_id, "end")
-                elif status == "Partially Completed":
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        if st.button("▶️ Resume", key=f"resume_{schedule_row_id}"):
-                            SchedulePage._handle_status_action(schedule_row_id, "start")
-                    with col_b:
-                        if st.button("✅ End", key=f"end_partial_{schedule_row_id}"):
-                            SchedulePage._handle_status_action(schedule_row_id, "end")
-                elif status == "Completed":
-                    st.success("✅ Completed")
-                
-                elif status == "Blocked":
-                    st.error("🚫 Blocked")
+
+        elif status == "Partially Completed":
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("▶️ Resume", key=f"resume_{schedule_row_id}"):
+                    SchedulePage._handle_status_action(schedule_row_id, "start")
+            with col_b:
+                if st.button("✅ End", key=f"end_partial_{schedule_row_id}"):
+                    SchedulePage._handle_status_action(schedule_row_id, "end")
+
+        elif status == "Completed":
+            st.success("✅ Completed")
+
+        elif status == "Blocked":
+            st.error("🚫 Blocked")
+
     @staticmethod
     def _handle_status_action(schedule_row_id: str, action: str):
         """Handle status change action"""
@@ -728,6 +745,11 @@ class SchedulePage:
             st.markdown("#### 👷 Technician Real-Time Availability")
             st.info("💡 Available time shows REAL free time (Total - Planned orders)")
             
+            # Build detailed technician availability table
+            st.markdown("---")
+            st.markdown("#### 👷 Technician Real-Time Availability")
+            st.info("ℹ️ Available time shows ACTUAL free time (only counting In Progress orders, NOT Planned)")
+
             tech_availability = []
             for tech in tech_list:
                 matricule = tech['Matricule']
@@ -735,43 +757,54 @@ class SchedulePage:
                 total_time = tech.get('Working Time', 0)
                 expertise = tech.get('Expertise Class', 0)
                 
-                # Calculate allocated time (ONLY Planned orders)
-                allocated = schedule_df[
+                # ✅ CALCULATE REAL AVAILABLE TIME (same logic as priority change)
+                # Only count orders that are IN PROGRESS (actually being worked on)
+                in_progress_orders = schedule_df[
                     (schedule_df['Technician Matricule'] == matricule) & 
-                    (schedule_df['Status'] == 'Planned')
-                ]['Routing Time (min)'].sum()
+                    (schedule_df['Status'] == 'In Progress')
+                ]
                 
-                # Real available time
-                available = total_time - allocated
-                utilization = (allocated / total_time * 100) if total_time > 0 else 0
+                # For in-progress orders, use actual time spent (or routing time if not tracked)
+                actual_used_time = 0
+                for _, order in in_progress_orders.iterrows():
+                    # Use TotalTimeSpent if available, otherwise use remaining time estimate
+                    if pd.notna(order.get('TotalTimeSpent')) and order['TotalTimeSpent'] > 0:
+                        actual_used_time += order['TotalTimeSpent']
+                    else:
+                        # Estimate: routing time - remaining time
+                        actual_used_time += order['Routing Time (min)'] - order.get('RemainingRoutingTime', 0)
                 
-                # Count orders
+                # Real available time = Total time - Actual used time
+                real_available = total_time - actual_used_time
+                
+                # Count Planned orders (not counting their time, just for info)
                 planned_count = len(schedule_df[
                     (schedule_df['Technician Matricule'] == matricule) & 
                     (schedule_df['Status'] == 'Planned')
                 ])
                 
-                in_progress_count = len(schedule_df[
-                    (schedule_df['Technician Matricule'] == matricule) & 
-                    (schedule_df['Status'] == 'In Progress')
-                ])
+                # Count In Progress orders
+                in_progress_count = len(in_progress_orders)
+                
+                # Calculate utilization based on ACTUAL work
+                utilization = (actual_used_time / total_time * 100) if total_time > 0 else 0
                 
                 # Check qualification
                 order_class = selected_order.get('Class Code', 1)
                 qualified = "✅ Yes" if expertise >= order_class else "❌ No"
                 
-                # Check if has enough time for this order
-                can_fit = available >= selected_order['routing time']
+                # ✅ Check if has enough REAL time for this order
+                can_fit = real_available >= selected_order['routing time']
                 
-                # Determine status
+                # ✅ Determine status based on REAL availability
                 if can_fit and expertise >= order_class:
                     status = "🟢 Available & Qualified"
                 elif can_fit:
                     status = "🟡 Available (Low Expertise)"
-                elif available > 0:
+                elif real_available > 0:
                     status = "🟠 Insufficient Time"
                 else:
-                    status = "🔴 Fully Booked"
+                    status = "🔴 Busy"
                 
                 tech_availability.append({
                     'Matricule': matricule,
@@ -779,19 +812,29 @@ class SchedulePage:
                     'Expertise': f"Level {expertise}",
                     'Qualified': qualified,
                     'Status': status,
-                    'Available Time': f"{available:.0f} min",
+                    'Real Available': f"{real_available:.0f} min",  # ✅ Changed label
                     'Utilization': f"{utilization:.0f}%",
-                    'Planned Orders': planned_count,
-                    'In Progress': in_progress_count,
+                    'Planned': f"{planned_count} orders",  # ✅ Added "orders"
+                    'In Progress': f"{in_progress_count} orders",  # ✅ Added "orders"
                     'Can Fit Order': "✅ Yes" if can_fit else "❌ No",
-                    'available_num': available,
+                    'available_num': real_available,  # ✅ Use real_available
                     'expertise_num': expertise,
                     'can_fit': can_fit
                 })
+                # Check qualification
+
             
             # Sort by: 1) Can fit order, 2) Qualified, 3) Most available
-            tech_availability.sort(key=lambda x: (-x['can_fit'], -(x['expertise_num'] >= selected_order.get('Class Code', 1)), -x['available_num']))
-            
+            #tech_availability.sort(key=lambda x: (-x['can_fit'], -(x['expertise_num'] >= selected_order.get('Class Code', 1)), -x['available_num']))
+            # Sort by: 1) Can fit order, 2) Qualified, 3) Most available
+            # ✅ FIX: Use proper boolean sorting (True=1, False=0)
+            tech_availability.sort(key=lambda x: (
+                not x['can_fit'],  # False (can fit) comes first
+                not (x['expertise_num'] >= selected_order.get('Class Code', 1)),  # False (qualified) comes first
+                -x['available_num']  # Higher availability comes first
+            ))
+
+            # Display table
             # Display table
             display_df = pd.DataFrame([
                 {
@@ -799,10 +842,11 @@ class SchedulePage:
                     'Expertise': t['Expertise'],
                     'Qualified': t['Qualified'],
                     'Status': t['Status'],
-                    'Available': t['Available Time'],
+                    'Real Available': t['Real Available'],  # ✅ Changed from 'Available'
                     'Utilization': t['Utilization'],
-                    'Planned': t['Planned Orders'],
                     'In Progress': t['In Progress'],
+                    'Planned': t['Planned'],
+                    'Total Capacity': f"{total_time:.0f} min",  # ✅ Added total capacity
                     'Can Fit': t['Can Fit Order']
                 }
                 for t in tech_availability
@@ -817,14 +861,21 @@ class SchedulePage:
             can_fit_techs = [t for t in tech_availability if t['can_fit']]
             
             if not can_fit_techs:
-                st.error("❌ No technicians have enough available time for this order")
-                st.info(f"💡 Order requires {selected_order['routing time']} minutes. All technicians are fully allocated.")
+                st.error("❌ No technicians have enough REAL available time for this order")
+                st.info(f"💡 Order requires {selected_order['routing time']} minutes. All technicians are currently working on other orders.")
+                
+                # Show which technicians have the most real time available
+                if tech_availability:
+                    top_available = sorted(tech_availability, key=lambda x: -x['available_num'])[:3]
+                    st.markdown("**Technicians with most real available time:**")
+                    for t in top_available:
+                        st.write(f"• {t['Name']}: {t['Real Available']} free ({t['In Progress']} working)")
                 return
             
             # Create options
             tech_options = {}
             for t in can_fit_techs:
-                display_text = f"{t['Name']} - {t['Status']} - {t['Available Time']} free ({t['Expertise']})"
+                display_text = f"{t['Name']} - {t['Status']} - {t['Real Available']} free ({t['In Progress']} working, {t['Planned']} planned)"
                 tech_options[display_text] = (t['Matricule'], t['Name'], t['expertise_num'])
             
             selected_tech_display = st.selectbox(
