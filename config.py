@@ -9,11 +9,14 @@ class Config:
     PRODUCTS_FILE = os.path.join(DATA_DIR, 'products_classified.csv')
     RECLAMATIONS_FILE = os.path.join(DATA_DIR, 'reclamations_file.xlsx')
     BLOCKED_ORDERS_FILE = os.path.join(DATA_DIR, 'blocked_orders.csv')
+    # ✅ ADD THIS NEW LINE
+    SCHEDULE_FILE = os.path.join(DATA_DIR, "current_schedule.csv")
+    UNSCHEDULED_FILE = os.path.join(DATA_DIR, "unscheduled_orders.csv")
     
     # ===== AUTHENTICATION =====
     # ⚠️ CHANGE THESE PASSWORDS!
     CREDENTIALS = {
-        "admin": "draex2024",
+        "admin": "app2024",
         "manager": "manager123",
         "user": "user123"
     }

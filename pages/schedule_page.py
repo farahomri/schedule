@@ -15,7 +15,10 @@ class SchedulePage:
             "📅 Schedule Management",
             f"Current Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
-        
+            # ✅ ADD THIS: Show if schedule was auto-loaded
+        if SessionManager.get('_schedule_auto_loaded', False):
+            st.info("📂 Schedule automatically restored from last session")
+            SessionManager.set('_schedule_auto_loaded', False)
         df = SessionManager.get('initial_schedule_df')
         
         if df is None:
@@ -535,19 +538,9 @@ class SchedulePage:
             return
         
         for idx, row in filtered_df.iterrows():
-            priority_display = ""
-            priority_value = row.get('Priority', None)
-            if priority_value == 'A' or priority_value == 1:
-                priority_display = "🔴 Priority A"
-            elif priority_value == 'B' or priority_value == 2:
-                priority_display = "🟡 Priority B"
-            elif priority_value == 'C' or priority_value == 3:
-                priority_display = "🟢 Priority C"
-            else:
-                priority_display = "⚪ No Priority"
-
+            # ✅ Simple title without priority
             with st.expander(
-                f"{priority_display} | Order {row['Order ID']} - {row['SAP']} | {row['Technician Name']}",
+                f"Order {row['Order ID']} - {row['SAP']} | {row['Technician Name']}",
                 expanded=False
             ):
                 SchedulePage._render_order_card(row)
@@ -598,8 +591,7 @@ class SchedulePage:
             st.markdown(f"**Status:**")
             st.markdown(UIComponents.status_badge(row['Status']), unsafe_allow_html=True)
             
-            if row.get('Remark'):
-                st.markdown(f"**Remark:** {row['Remark']}")
+
         
         # Column 4: Action Buttons
         with col4:
@@ -839,15 +831,15 @@ class SchedulePage:
             display_df = pd.DataFrame([
                 {
                     'Technician': t['Name'],
-                    'Expertise': t['Expertise'],
-                    'Qualified': t['Qualified'],
+                    #'Expertise': t['Expertise'],
+                    #'Qualified': t['Qualified'],
                     'Status': t['Status'],
                     'Real Available': t['Real Available'],  # ✅ Changed from 'Available'
                     'Utilization': t['Utilization'],
                     'In Progress': t['In Progress'],
                     'Planned': t['Planned'],
                     'Total Capacity': f"{total_time:.0f} min",  # ✅ Added total capacity
-                    'Can Fit': t['Can Fit Order']
+                    #'Can Fit': t['Can Fit Order']
                 }
                 for t in tech_availability
             ])

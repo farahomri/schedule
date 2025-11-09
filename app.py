@@ -18,6 +18,89 @@ from models.initial_scheduling import (
     find_missing_sap_numbers, merge_orders_with_class_code,
     calculate_working_time, create_initial_schedule
 )
+from services.persistence_service import PersistenceService
+def process_bulk_orders(uploaded_df, existing_df, file_path):
+    """
+    Process bulk orders upload:
+    - Add new orders
+    - Update orders with different routing times
+    - Skip unchanged orders
+    
+    NO UI ELEMENTS - PURE PROCESSING ONLY
+    """
+    added = []
+    modified = []
+    skipped = []
+    errors = []
+    
+    # Ensure SAP columns are strings for comparison
+    existing_df['SAP'] = existing_df['SAP'].astype(str)
+    
+    for idx, row in uploaded_df.iterrows():
+        try:
+            # Extract data from uploaded file
+            sap = str(row.get('Material Number', row.get('Material number', row.get('SAP', '')))).strip()
+            description = str(row.get('Material description', row.get('Material Description', ''))).strip()
+            routing_time = row.get('routing time', row.get('Routing Time', row.get('Routing time', None)))
+            
+            # Validate required fields
+            if not sap or pd.isna(sap) or sap == 'nan' or sap == '':
+                errors.append(f"Row {idx+2}: Missing Material Number")
+                continue
+            
+            if pd.isna(routing_time) or routing_time == '':
+                errors.append(f"Row {idx+2}: Missing routing time for SAP {sap}")
+                continue
+            
+            try:
+                routing_time = float(routing_time)
+            except ValueError:
+                errors.append(f"Row {idx+2} (SAP {sap}): Invalid routing time '{routing_time}'")
+                continue
+            
+            if routing_time <= 0:
+                errors.append(f"Row {idx+2} (SAP {sap}): Routing time must be positive")
+                continue
+            
+            if not description or description == 'nan':
+                description = f"Product {sap}"  # Default description
+            
+            # Check if SAP exists
+            if sap in existing_df['SAP'].values:
+                # Get existing routing time
+                existing_time = existing_df.loc[existing_df['SAP'] == sap, 'routing time'].values[0]
+                
+                if abs(float(existing_time) - routing_time) > 0.01:  # Different routing time
+                    # Modify order
+                    from models.orders import modify_order
+                    existing_df = modify_order(existing_df, sap, description, routing_time, file_path)
+                    modified.append({
+                        'SAP': sap,
+                        'Description': description,
+                        'Old Time': existing_time,
+                        'New Time': routing_time
+                    })
+                else:
+                    # Skip - same routing time
+                    skipped.append({
+                        'SAP': sap,
+                        'Description': description,
+                        'Routing Time': routing_time
+                    })
+            else:
+                # Add new order
+                from models.orders import add_order
+                existing_df = add_order(existing_df, sap, description, routing_time, file_path)
+                added.append({
+                    'SAP': sap,
+                    'Description': description,
+                    'Routing Time': routing_time
+                })
+        
+        except Exception as e:
+            errors.append(f"Row {idx+2} (SAP {sap if 'sap' in locals() else 'Unknown'}): {str(e)}")
+    
+    return existing_df, added, modified, skipped, errors
 
 # Page config
 st.set_page_config(
@@ -158,9 +241,9 @@ def render_initial_scheduling_page():
                         SessionManager.set('merged_orders', merged_orders)
                         SessionManager.set('working_technicians', working_technicians)
                         SessionManager.set('_initial_schedule_processed', True)
+                        PersistenceService.save_schedule(schedule_df, unscheduled_df)
                         
                         st.success("✅ Schedule generated successfully!")
-                        st.balloons()
                         
                         # Summary
                         st.markdown("### 📊 Schedule Summary")
@@ -286,8 +369,8 @@ def render_technicians_page():
     st.write(df.describe())
 
 def render_orders_page():
-    """Orders management page - Copy your existing code here"""
-    st.header("📦 Manage Orders")
+    """Orders management page with full CRUD operations + Bulk Upload"""
+    st.header("📦 Manage Orders (Products)")
     
     products_classified_path = Config.PRODUCTS_FILE
     
@@ -298,21 +381,393 @@ def render_orders_page():
         st.error(f"File not found: {products_classified_path}")
         return
     
-    # Display orders
-    if st.checkbox("Show Products List (first 100)"):
-        st.dataframe(df_orders.head(100), use_container_width=True)
+    # ===== BULK UPLOAD SECTION =====
+    st.markdown("---")
+    st.markdown("### 📤 Bulk Upload Orders")
+
+    with st.expander("📂 Upload Orders File (Excel/CSV)", expanded=False):
+        st.info("""
+        **📋 Required Columns:**
+        - `Material Number` (or `SAP`) - Product identifier
+        - `Material description` (or `Material Description`) - Product name
+        - `routing time` (or `Routing Time`) - Time in minutes
+        
+        **Optional Columns:**
+        - `Order` (or `Order ID`) - Order number (not stored in products file)
+        - `Priority` - Order priority (not stored in products file)
+        
+        **How it works:**
+        - ✅ **New products** → Added to database
+        - 🔄 **Existing products with different routing time** → Updated
+        - ⏭️ **Existing products with same routing time** → Skipped
+        """)
+        
+        uploaded_file = st.file_uploader(
+            "Upload Orders File",
+            type=['xlsx', 'xls', 'csv'],
+            key="bulk_orders_upload",
+            help="Excel or CSV file with Material Number, Material Description, and Routing Time"
+        )
+        
+        if uploaded_file:
+            try:
+                # Read file
+                if uploaded_file.name.endswith('.csv'):
+                    uploaded_df = pd.read_csv(uploaded_file)
+                else:
+                    uploaded_df = pd.read_excel(uploaded_file, engine='openpyxl')
+                
+                st.success(f"✅ Loaded {len(uploaded_df)} orders from file")
+                
+                # Show preview
+                st.markdown("#### 📋 File Preview (first 10 rows)")
+                st.dataframe(uploaded_df.head(10), use_container_width=True)
+                
+                # Validate columns
+                required_cols = ['Material Number', 'Material number', 'SAP', 'material number']
+                has_material = any(col in uploaded_df.columns for col in required_cols)
+                
+                time_cols = ['routing time', 'Routing Time', 'Routing time']
+                has_routing_time = any(col in uploaded_df.columns for col in time_cols)
+                
+                if not has_material:
+                    st.error("❌ Missing required column: 'Material Number' or 'SAP'")
+                elif not has_routing_time:
+                    st.error("❌ Missing required column: 'routing time' or 'Routing Time'")
+                else:
+                    st.success("✅ File format validated")
+                    
+                    # Process button
+                    st.markdown("---")
+                    col1, col2, col3 = st.columns([1, 2, 1])
+                    
+                    with col2:
+                        if st.button("🚀 Process Orders", type="primary", use_container_width=True, key="btn_process_bulk"):
+                            with st.spinner("⏳ Processing orders..."):
+                                # Process the orders
+                                df_orders, added, modified, skipped, errors = process_bulk_orders(
+                                    uploaded_df, df_orders, products_classified_path
+                                )
+                                
+                                # ✅ ONLY store results in session state - NO display here!
+                                st.session_state['bulk_results'] = {
+                                    'added': added,
+                                    'modified': modified,
+                                    'skipped': skipped,
+                                    'errors': errors,
+                                    'timestamp': datetime.now()
+                                }
+                                
+                                # Reload data
+                                df_orders = load_orders(products_classified_path)
+                                
+                                st.success("✅ Processing complete! See results below.")
+                                st.rerun()
+            
+            except Exception as e:
+                st.error(f"❌ Error reading file: {str(e)}")
+                st.markdown("**Error Details:**")
+                import traceback
+                st.code(traceback.format_exc())
+
+    # ===== DISPLAY BULK UPLOAD RESULTS (OUTSIDE EXPANDER) =====
+    if 'bulk_results' in st.session_state:
+        results = st.session_state['bulk_results']
+        added = results['added']
+        modified = results['modified']
+        skipped = results['skipped']
+        errors = results['errors']
+        
+        st.markdown("---")
+        st.markdown("### 📊 Bulk Upload Results")
+        st.info(f"Processed at: {results['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        col_a, col_b, col_c, col_d = st.columns(4)
+        
+        with col_a:
+            st.metric("✅ Added", len(added))
+        with col_b:
+            st.metric("🔄 Modified", len(modified))
+        with col_c:
+            st.metric("⏭️ Skipped", len(skipped))
+        with col_d:
+            st.metric("❌ Errors", len(errors))
+        
+        # ✅ Use TABS instead of expanders (tabs can't be nested, so safer)
+        if added or modified or skipped or errors:
+            tab1, tab2, tab3, tab4 = st.tabs([
+                f"✅ Added ({len(added)})",
+                f"🔄 Modified ({len(modified)})",
+                f"⏭️ Skipped ({len(skipped)})",
+                f"❌ Errors ({len(errors)})"
+            ])
+            
+            with tab1:
+                if added:
+                    st.dataframe(pd.DataFrame(added), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No products were added")
+            
+            with tab2:
+                if modified:
+                    st.dataframe(pd.DataFrame(modified), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No products were modified")
+            
+            with tab3:
+                if skipped:
+                    st.info("These products already exist with the same routing time")
+                    if len(skipped) <= 50:
+                        st.dataframe(pd.DataFrame(skipped), use_container_width=True, hide_index=True)
+                    else:
+                        st.write(f"Too many to display ({len(skipped)} items). Showing first 50:")
+                        st.dataframe(pd.DataFrame(skipped[:50]), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No products were skipped")
+            
+            with tab4:
+                if errors:
+                    for error in errors:
+                        st.error(error)
+                else:
+                    st.success("No errors occurred")
+        
+        # Clear results button
+        col_clear1, col_clear2, col_clear3 = st.columns([1, 1, 1])
+        with col_clear2:
+            if st.button("🗑️ Clear Results", key="clear_bulk_results", use_container_width=True):
+                del st.session_state['bulk_results']
+                st.rerun()
+        
+        if len(added) + len(modified) > 0:
+            st.success(f"✅ Successfully processed {len(added) + len(modified)} products!")
     
-    st.info("💡 Copy your full manage_orders() function code here from your old app.py")
-    st.markdown("""
-    **Replace:**
-```python
-    products_classified_path = '../data/products_classified.csv'
-```
-    **With:**
-```python
-    products_classified_path = Config.PRODUCTS_FILE
-```
-    """)
+    # ===== DISPLAY ORDERS =====
+    st.markdown("---")
+    st.markdown("### 📋 Current Products")
+    
+    # Search/Filter
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        search_term = st.text_input("🔍 Search by SAP or Description", "")
+    with col2:
+        show_all = st.checkbox("Show All Products", value=False)
+    
+    # Filter dataframe
+    if search_term:
+        filtered_df = df_orders[
+            df_orders['SAP'].astype(str).str.contains(search_term, case=False, na=False) |
+            df_orders['Material Description'].astype(str).str.contains(search_term, case=False, na=False)
+        ]
+        st.info(f"Found {len(filtered_df)} matching products")
+    else:
+        filtered_df = df_orders
+    
+    # Display table
+    if show_all:
+        st.dataframe(filtered_df, use_container_width=True, hide_index=True)
+    else:
+        st.dataframe(filtered_df.head(100), use_container_width=True, hide_index=True)
+        if len(filtered_df) > 100:
+            st.info(f"Showing first 100 of {len(filtered_df)} products. Check 'Show All Products' to see all.")
+    
+    # ===== MANAGE ORDERS =====
+    st.markdown("---")
+    st.markdown("### ⚙️ Manage Products")
+    
+    tab1, tab2, tab3 = st.tabs(["➕ Add Product", "✏️ Modify Product", "🗑️ Delete Product"])
+    
+    # ===== TAB 1: ADD PRODUCT =====
+    with tab1:
+        st.markdown("#### Add New Product")
+        st.info("💡 Classification is automatic based on routing time: Low (0-160min), Medium (160-320min), High (320-480min), Very High (480+min)")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            add_sap = st.text_input("SAP Number*", key="add_sap", help="Unique product identifier")
+            add_description = st.text_input("Material Description*", key="add_description")
+        
+        with col2:
+            add_routing_time = st.number_input(
+                "Routing Time (minutes)*",
+                min_value=1,
+                max_value=10000,
+                value=60,
+                key="add_routing_time"
+            )
+            
+            # Show predicted classification
+            from models.orders import classify_order
+            preview_class, preview_code = classify_order(add_routing_time)
+            st.info(f"📊 Classification Preview: **{preview_class}** (Level {preview_code})")
+        
+        st.markdown("---")
+        
+        if st.button("➕ Add Product", type="primary", use_container_width=True, key="btn_add_order"):
+            if not add_sap or not add_description:
+                st.error("❌ SAP Number and Material Description are required")
+            elif str(add_sap) in df_orders['SAP'].astype(str).values:
+                st.error(f"❌ SAP {add_sap} already exists. Use 'Modify Product' to update it.")
+            else:
+                try:
+                    df_orders = add_order(df_orders, add_sap, add_description, add_routing_time, products_classified_path)
+                    st.success(f"✅ Product {add_sap} added successfully!")
+                    st.balloons()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Error adding product: {str(e)}")
+    
+    # ===== TAB 2: MODIFY PRODUCT =====
+    with tab2:
+        st.markdown("#### Modify Existing Product")
+        
+        col1, col2 = st.columns([1, 2])
+        
+        with col1:
+            modify_sap = st.text_input("SAP Number to Modify*", key="modify_sap")
+            
+            if modify_sap and st.button("🔍 Load Product", key="btn_load_order"):
+                df_orders['SAP'] = df_orders['SAP'].astype(str)
+                if str(modify_sap) in df_orders['SAP'].values:
+                    existing = df_orders[df_orders['SAP'] == str(modify_sap)].iloc[0]
+                    st.session_state['modify_loaded'] = True
+                    st.session_state['modify_existing'] = existing
+                    st.success(f"✅ Loaded product: {existing['Material Description']}")
+                else:
+                    st.error(f"❌ SAP {modify_sap} not found")
+                    st.session_state['modify_loaded'] = False
+        
+        with col2:
+            if st.session_state.get('modify_loaded', False):
+                existing = st.session_state['modify_existing']
+                
+                st.markdown("**Current Values:**")
+                st.write(f"• Description: {existing['Material Description']}")
+                st.write(f"• Routing Time: {existing['routing time']} min")
+                st.write(f"• Class: {existing['Class']} (Level {existing['Class Code']})")
+        
+        if st.session_state.get('modify_loaded', False):
+            st.markdown("---")
+            st.markdown("**New Values:**")
+            
+            col_a, col_b = st.columns(2)
+            
+            with col_a:
+                new_description = st.text_input(
+                    "New Material Description*",
+                    value=existing['Material Description'],
+                    key="new_description"
+                )
+            
+            with col_b:
+                new_routing_time = st.number_input(
+                    "New Routing Time (minutes)*",
+                    min_value=1,
+                    max_value=10000,
+                    value=int(existing['routing time']),
+                    key="new_routing_time"
+                )
+                
+                # Show new classification
+                from models.orders import classify_order
+                new_class, new_code = classify_order(new_routing_time)
+                st.info(f"📊 New Classification: **{new_class}** (Level {new_code})")
+            
+            st.markdown("---")
+            
+            if st.button("✏️ Update Product", type="primary", use_container_width=True, key="btn_modify_order"):
+                if not new_description:
+                    st.error("❌ Material Description is required")
+                else:
+                    try:
+                        df_orders = modify_order(df_orders, modify_sap, new_description, new_routing_time, products_classified_path)
+                        st.success(f"✅ Product {modify_sap} updated successfully!")
+                        st.session_state['modify_loaded'] = False
+                        st.balloons()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Error modifying product: {str(e)}")
+    
+    # ===== TAB 3: DELETE PRODUCT =====
+    with tab3:
+        st.markdown("#### Delete Product")
+        st.warning("⚠️ This action cannot be undone!")
+        
+        col1, col2 = st.columns([1, 2])
+        
+        with col1:
+            delete_sap = st.text_input("SAP Number to Delete*", key="delete_sap")
+            
+            if delete_sap and st.button("🔍 Check Product", key="btn_check_delete"):
+                df_orders['SAP'] = df_orders['SAP'].astype(str)
+                if str(delete_sap) in df_orders['SAP'].values:
+                    existing = df_orders[df_orders['SAP'] == str(delete_sap)].iloc[0]
+                    st.session_state['delete_loaded'] = True
+                    st.session_state['delete_existing'] = existing
+                    st.info(f"Found: {existing['Material Description']}")
+                else:
+                    st.error(f"❌ SAP {delete_sap} not found")
+                    st.session_state['delete_loaded'] = False
+        
+        with col2:
+            if st.session_state.get('delete_loaded', False):
+                existing = st.session_state['delete_existing']
+                
+                st.markdown("**Product Details:**")
+                st.write(f"• SAP: {existing['SAP']}")
+                st.write(f"• Description: {existing['Material Description']}")
+                st.write(f"• Routing Time: {existing['routing time']} min")
+                st.write(f"• Class: {existing['Class']}")
+        
+        if st.session_state.get('delete_loaded', False):
+            st.markdown("---")
+            
+            col_confirm1, col_confirm2, col_confirm3 = st.columns([1, 2, 1])
+            
+            with col_confirm2:
+                confirm_delete = st.checkbox(
+                    f"⚠️ I confirm deletion of SAP {delete_sap}",
+                    key="confirm_delete"
+                )
+                
+                if confirm_delete:
+                    if st.button("🗑️ DELETE PRODUCT", type="primary", use_container_width=True, key="btn_delete_order"):
+                        try:
+                            df_orders = delete_order(df_orders, delete_sap, products_classified_path)
+                            st.success(f"✅ Product {delete_sap} deleted successfully!")
+                            st.session_state['delete_loaded'] = False
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Error deleting product: {str(e)}")
+    
+    # ===== STATISTICS =====
+    st.markdown("---")
+    st.markdown("### 📊 Product Statistics")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Total Products", len(df_orders))
+    
+    with col2:
+        avg_time = df_orders['routing time'].mean()
+        st.metric("Avg Routing Time", f"{avg_time:.1f} min")
+    
+    with col3:
+        if 'Class' in df_orders.columns:
+            most_common = df_orders['Class'].value_counts().index[0] if not df_orders['Class'].isna().all() else "N/A"
+            st.metric("Most Common Class", most_common)
+    
+    with col4:
+        max_time = df_orders['routing time'].max()
+        st.metric("Max Routing Time", f"{max_time:.0f} min")
+    
+    # Class distribution
+    if 'Class' in df_orders.columns:
+        st.markdown("#### 📈 Classification Distribution")
+        class_counts = df_orders['Class'].value_counts()
+        st.bar_chart(class_counts)
 
 def render_reclamations_page():
     st.header("Manage Reclamations")
