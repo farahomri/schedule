@@ -116,6 +116,7 @@ def main():
     # Initialize
     SessionManager.initialize()
     FileService.initialize_all_files()
+
     
     # Check authentication
     if not AuthService.require_login():
@@ -241,7 +242,7 @@ def render_initial_scheduling_page():
                         SessionManager.set('merged_orders', merged_orders)
                         SessionManager.set('working_technicians', working_technicians)
                         SessionManager.set('_initial_schedule_processed', True)
-                        PersistenceService.save_schedule(schedule_df, unscheduled_df)
+                        PersistenceService.save_schedule(schedule_df, unscheduled_df, working_technicians)
                         
                         st.success("✅ Schedule generated successfully!")
                         

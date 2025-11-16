@@ -12,7 +12,8 @@ class Config:
     # ✅ ADD THIS NEW LINE
     SCHEDULE_FILE = os.path.join(DATA_DIR, "current_schedule.csv")
     UNSCHEDULED_FILE = os.path.join(DATA_DIR, "unscheduled_orders.csv")
-    
+    # Add this line to Config class
+    WORKING_TECHNICIANS_FILE = os.path.join(DATA_DIR, 'working_technicians.csv')
     # ===== AUTHENTICATION =====
     # ⚠️ CHANGE THESE PASSWORDS!
     CREDENTIALS = {
