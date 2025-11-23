@@ -157,6 +157,12 @@ def render_initial_scheduling_page():
         "📊 Initial Scheduling",
         "Upload orders and shifts files to generate schedule"
     )
+    if SessionManager.get('initial_schedule_df') is None:
+        if FileService.schedule_exists():
+            loaded_schedule = FileService.load_schedule()
+            if loaded_schedule is not None:
+                SessionManager.set('initial_schedule_df', loaded_schedule)
+                st.info("✅ Loaded previous schedule from file")
     
     # Instructions
     with st.expander("📖 Instructions", expanded=False):
@@ -243,7 +249,8 @@ def render_initial_scheduling_page():
                         SessionManager.set('working_technicians', working_technicians)
                         SessionManager.set('_initial_schedule_processed', True)
                         PersistenceService.save_schedule(schedule_df, unscheduled_df, working_technicians)
-                        
+                        FileService.save_schedule(schedule_df)
+
                         st.success("✅ Schedule generated successfully!")
                         
                         # Summary
@@ -289,6 +296,7 @@ def render_initial_scheduling_page():
         with col2:
             if st.button("🗑️ Clear Schedule", use_container_width=True):
                 SessionManager.clear_schedule()
+                FileService.delete_schedule()
                 st.success("Schedule cleared!")
                 st.rerun()
             

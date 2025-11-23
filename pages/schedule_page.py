@@ -180,6 +180,8 @@ class SchedulePage:
             
             if success:
                 SessionManager.set('initial_schedule_df', updated_df)
+                from services.file_service import FileService
+                FileService.save_schedule(updated_df)
                 st.success(f"✅ {message}")
                 st.rerun()
             else:
@@ -409,7 +411,12 @@ class SchedulePage:
             df['SequenceNumber'] = range(1, len(df) + 1)
             df = df.drop('_temp_priority', axis=1)
             
+            # Save to session
             SessionManager.set('initial_schedule_df', df)
+            
+            # ✅ AUTO-SAVE: Persist to file
+            from services.file_service import FileService
+            FileService.save_schedule(df)
             
             st.success(f"✅ Priority: {old_priority} → {new_priority_value}")
             
@@ -631,14 +638,22 @@ class SchedulePage:
         elif status == "Blocked":
             st.error("🚫 Blocked")
 
+
+
     @staticmethod
     def _handle_status_action(schedule_row_id: str, action: str):
-        """Handle status change action"""
+        """Handle status change action and auto-save"""
+        from services.file_service import FileService
+        
         df = SessionManager.get('initial_schedule_df')
         updated_df, success, message = ScheduleService.update_order_status(df, schedule_row_id, action)
         
         if success:
             SessionManager.set('initial_schedule_df', updated_df)
+            
+            # ✅ AUTO-SAVE: Save to file after every status change
+            FileService.save_schedule(updated_df)
+            
             st.success(f"✅ {message}")
             st.rerun()
         else:
@@ -930,6 +945,8 @@ class SchedulePage:
                 # Update session
                 SessionManager.set('initial_schedule_df', schedule_df)
                 SessionManager.set('unscheduled_orders_df', unscheduled_df)
+                from services.file_service import FileService
+                FileService.save_schedule(schedule_df)
                 
                 st.success(f"✅ Order {selected_order['Order ID']} assigned to {selected_tech[1]}")
                 st.balloons()
