@@ -15,13 +15,10 @@ class Config:
     # Add this line to Config class
     WORKING_TECHNICIANS_FILE = os.path.join(DATA_DIR, 'working_technicians.csv')
     # ===== AUTHENTICATION =====
-    # ⚠️ CHANGE THESE PASSWORDS!
-    CREDENTIALS = {
-        "admin": "app2024",
-        "manager": "manager123",
-        "user": "user123"
-    }
-    
+    # Credentials are stored outside source code.
+    # Local dev: .streamlit/secrets.toml (see .streamlit/secrets.toml.example)
+    # Production: environment variables ADMIN_PASSWORD, MANAGER_PASSWORD, USER_PASSWORD
+
     # ===== ORDER CLASSIFICATION =====
     CLASS_THRESHOLDS = [
         (0, 160, 'Low', 1),

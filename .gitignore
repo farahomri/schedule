@@ -1,0 +1,27 @@
+# Credentials — never commit these
+.env
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Operational CSV data (managed by DB; CSV copies are migration artefacts)
+data/current_schedule.csv
+data/unscheduled_orders.csv
+data/working_technicians.csv

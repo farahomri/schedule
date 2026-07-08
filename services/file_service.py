@@ -23,56 +23,6 @@ class FileService:
             pd.DataFrame(columns=columns).to_excel(file_path, index=False)
     
     @staticmethod
-    def save_schedule(schedule_df):
-        """Save schedule to persistent file"""
-        try:
-            from config import Config
-            schedule_df.to_csv(Config.SCHEDULE_FILE, index=False)
-            return True
-        except Exception as e:
-            print(f"Error saving schedule: {e}")
-            return False
-    
-    @staticmethod
-    def load_schedule():
-        """Load schedule from persistent file"""
-        try:
-            from config import Config
-            import pandas as pd
-            
-            if os.path.exists(Config.SCHEDULE_FILE):
-                df = pd.read_csv(Config.SCHEDULE_FILE)
-                
-                # Convert datetime columns back from strings
-                datetime_cols = ['FirstStartTime', 'EndTime']
-                for col in datetime_cols:
-                    if col in df.columns:
-                        df[col] = pd.to_datetime(df[col], errors='coerce')
-                
-                # Ensure numeric columns are correct type
-                if 'TotalTimeSpent' in df.columns:
-                    df['TotalTimeSpent'] = pd.to_numeric(df['TotalTimeSpent'], errors='coerce').fillna(0.0)
-                if 'RemainingRoutingTime' in df.columns:
-                    df['RemainingRoutingTime'] = pd.to_numeric(df['RemainingRoutingTime'], errors='coerce')
-                if 'Routing Time (min)' in df.columns:
-                    df['Routing Time (min)'] = pd.to_numeric(df['Routing Time (min)'], errors='coerce')
-                if 'SequenceNumber' in df.columns:
-                    df['SequenceNumber'] = pd.to_numeric(df['SequenceNumber'], errors='coerce').fillna(0).astype(int)
-                
-                # Ensure WorkSessions is string
-                if 'WorkSessions' in df.columns:
-                    df['WorkSessions'] = df['WorkSessions'].fillna('[]').astype(str)
-                
-                print(f"✅ Loaded schedule: {len(df)} orders")
-                return df
-            else:
-                print("ℹ️ No saved schedule found")
-                return None
-        except Exception as e:
-            print(f"❌ Error loading schedule: {e}")
-            return None
-    
-    @staticmethod
     def schedule_exists():
         """Check if a saved schedule exists"""
         from config import Config
