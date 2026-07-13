@@ -57,6 +57,28 @@ class SchedulePage:
         stat_keys = ['Planned', 'In Progress', 'Partially Completed', 'Completed', 'Blocked', 'Total']
         UIComponents.metric_cards({k: stats.get(k, 0) for k in stat_keys if k in stats})
 
+        # ── Delete schedule ───────────────────────────────────────────────────
+        st.markdown("---")
+        with st.expander("🗑️ Delete Schedule", expanded=False):
+            st.warning(
+                f"This will permanently delete **all {len(assignments)} assignment(s)** "
+                f"for **{selected_date}**, including any In Progress or Completed records. "
+                "This cannot be undone."
+            )
+            confirmed = st.checkbox(
+                "I understand this is irreversible", key=f"del_confirm_{selected_date}"
+            )
+            if st.button(
+                "🗑️ Delete entire schedule for this date",
+                type="primary",
+                disabled=not confirmed,
+                key=f"del_btn_{selected_date}",
+            ):
+                with get_session() as session:
+                    deleted = ScheduleRepository.delete_all_by_date(session, selected_date)
+                st.success(f"✅ Deleted {deleted} assignment(s) for {selected_date}.")
+                st.rerun()
+
         st.markdown("---")
 
         # ── Edit section ──────────────────────────────────────────────────────
