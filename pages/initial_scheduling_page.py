@@ -127,9 +127,10 @@ class InitialSchedulingPage:
 
                     st.dataframe(
                         pd.DataFrame([{
-                            'Technician': a.technician_matricule,
+                            'Technician': a.technician_name,
                             'Order ID': a.erp_order_id,
                             'SAP': a.sap_number,
+                            'Qty': a.quantity,
                             'Time (min)': a.routing_time_minutes,
                             'Status': a.status,
                             'Override': '⚠️' if a.is_expertise_override else '',
@@ -172,6 +173,15 @@ class InitialSchedulingPage:
                 order_dtos = OrderService.parse_orders_from_upload(orders_df, schedule_date)
                 missing_sap = OrderService.validate_orders(order_dtos)
 
+            if not order_dtos:
+                st.error(
+                    "❌ No orders were found in the file. "
+                    "Make sure your file has these columns: "
+                    "**'Material Number'** (SAP), **'Order'** (ERP ID), "
+                    "**'Priority'**, **'Order quantity (GMEIN)'**."
+                )
+                return
+
             if missing_sap:
                 st.error(
                     f"❌ {len(missing_sap)} SAP number(s) not found in the product catalogue. "
@@ -205,8 +215,15 @@ class InitialSchedulingPage:
 
             # ── 3. Persist orders & shifts ────────────────────────────────────
             with st.spinner("Saving to database…"):
-                OrderService.save_production_orders(order_dtos, schedule_date)
+                new_order_count = OrderService.save_production_orders(order_dtos, schedule_date)
                 ShiftService.save_shifts(shift_dtos, schedule_date)
+
+            if new_order_count == 0:
+                st.info(
+                    "ℹ️ All orders in this file already exist in today's schedule — "
+                    "nothing new was added. Upload a file with new order IDs to schedule more."
+                )
+                return
 
             # ── 4. Resolve daily pool (carryover + late orders) ───────────────
             with st.spinner("Resolving order pool…"):

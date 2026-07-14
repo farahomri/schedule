@@ -84,6 +84,11 @@ class ScheduleRepository:
         )
 
     @staticmethod
+    def delete_all_assignments(session: Session) -> int:
+        """Delete ALL assignments across every date. Returns row count."""
+        return session.query(ScheduleAssignment).delete(synchronize_session=False)
+
+    @staticmethod
     def find_unscheduled_by_date(
         session: Session, schedule_date: Date
     ) -> list[ProductionOrder]:

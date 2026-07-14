@@ -20,6 +20,8 @@ class AssignmentDTO:
     sap_number: str
     technician_id: int
     technician_matricule: str
+    technician_name: str
+    quantity: int
     schedule_date: Date
     status: str
     routing_time_minutes: float
@@ -94,7 +96,8 @@ class DailyOrderPoolService:
                             session.flush()
                             carried_in_progress.append(DailyOrderPoolService._build_dto(
                                 new_a.id, a, replacement.technician_id,
-                                replacement.matricule, schedule_date, 'In Progress',
+                                replacement.matricule, replacement.full_name,
+                                schedule_date, 'In Progress',
                             ))
                             committed_tech_ids.add(replacement.technician_id)
                         else:
@@ -123,6 +126,7 @@ class DailyOrderPoolService:
                 if preferred_tech_id in working_tech_ids:
                     tech_id = preferred_tech_id
                     matricule = a.technician.matricule if a.technician else ""
+                    tech_name = a.technician.full_name if a.technician else ""
                 else:
                     class_code = DailyOrderPoolService._class_code(a)
                     replacement = DailyOrderPoolService._find_replacement_technician(
@@ -132,6 +136,7 @@ class DailyOrderPoolService:
                         continue  # leave blocked, no available tech
                     tech_id = replacement.technician_id
                     matricule = replacement.matricule
+                    tech_name = replacement.full_name
 
                 new_a = ScheduleAssignment(
                     production_order_id=a.production_order_id,
@@ -146,7 +151,7 @@ class DailyOrderPoolService:
                 session.add(new_a)
                 session.flush()
                 unblocked_reassigned.append(DailyOrderPoolService._build_dto(
-                    new_a.id, a, tech_id, matricule, schedule_date, 'Planned',
+                    new_a.id, a, tech_id, matricule, tech_name, schedule_date, 'Planned',
                 ))
 
             # ── Step 3 & 4: Build assignable pool inside session ──────────────
@@ -194,12 +199,15 @@ class DailyOrderPoolService:
     @staticmethod
     def _to_dto(a: ScheduleAssignment) -> AssignmentDTO:
         order = a.production_order
+        tech = a.technician
         return AssignmentDTO(
             assignment_id=a.id,
             erp_order_id=order.erp_order_id if order else "",
             sap_number=order.product.sap_number if (order and order.product) else "",
             technician_id=a.technician_id,
-            technician_matricule=a.technician.matricule if a.technician else "",
+            technician_matricule=tech.matricule if tech else "",
+            technician_name=tech.full_name if tech else "",
+            quantity=order.quantity if order else 0,
             schedule_date=a.schedule_date,
             status=a.status,
             routing_time_minutes=float(a.routing_time_minutes),
@@ -214,6 +222,7 @@ class DailyOrderPoolService:
         source: ScheduleAssignment,
         tech_id: int,
         matricule: str,
+        tech_name: str,
         schedule_date: Date,
         status: str,
     ) -> AssignmentDTO:
@@ -225,6 +234,8 @@ class DailyOrderPoolService:
             sap_number=order.product.sap_number if (order and order.product) else "",
             technician_id=tech_id,
             technician_matricule=matricule,
+            technician_name=tech_name,
+            quantity=order.quantity if order else 0,
             schedule_date=schedule_date,
             status=status,
             routing_time_minutes=float(source.routing_time_minutes),

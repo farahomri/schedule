@@ -57,3 +57,8 @@ class ProductionOrderRepository:
             .filter_by(order_date=order_date)
             .delete(synchronize_session=False)
         )
+
+    @staticmethod
+    def delete_all(session: Session) -> int:
+        """Delete ALL production orders across every date. Returns row count."""
+        return session.query(ProductionOrder).delete(synchronize_session=False)

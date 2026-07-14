@@ -292,8 +292,8 @@ class OrderService:
     @staticmethod
     def save_production_orders(
         order_dtos: list[ProductionOrderDTO], order_date: Date
-    ) -> None:
-        """Insert production orders into the DB, skipping duplicates (idempotent)."""
+    ) -> int:
+        """Insert production orders into the DB, skipping duplicates. Returns count of newly inserted rows."""
         with get_session() as session:
             new_orders = []
             for dto in order_dtos:
@@ -312,6 +312,7 @@ class OrderService:
                 ))
             if new_orders:
                 ProductionOrderRepository.bulk_insert(session, new_orders)
+            return len(new_orders)
 
     @staticmethod
     def get_late_orders(order_date: Date) -> list[ProductionOrderDTO]:

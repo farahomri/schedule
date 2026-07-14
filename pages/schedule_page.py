@@ -7,6 +7,7 @@ import streamlit as st
 
 from db.database import get_session
 from db.models import ScheduleAssignment
+from repositories.production_order_repository import ProductionOrderRepository
 from repositories.schedule_repository import ScheduleRepository
 from services.auth_service import AuthService
 from services.schedule_service import ScheduleService
@@ -43,6 +44,11 @@ class SchedulePage:
             st.error(f"Error loading schedule: {e}")
             return
 
+        # ── Delete section (shown even when there is no schedule yet) ──────────
+        st.markdown("---")
+        SchedulePage._render_delete_section(selected_date, len(assignments))
+        st.markdown("---")
+
         if not assignments:
             UIComponents.info_message(
                 "No schedule generated for this date yet. "
@@ -56,28 +62,6 @@ class SchedulePage:
         stats = ScheduleService.get_statistics(selected_date)
         stat_keys = ['Planned', 'In Progress', 'Partially Completed', 'Completed', 'Blocked', 'Total']
         UIComponents.metric_cards({k: stats.get(k, 0) for k in stat_keys if k in stats})
-
-        # ── Delete schedule ───────────────────────────────────────────────────
-        st.markdown("---")
-        with st.expander("🗑️ Delete Schedule", expanded=False):
-            st.warning(
-                f"This will permanently delete **all {len(assignments)} assignment(s)** "
-                f"for **{selected_date}**, including any In Progress or Completed records. "
-                "This cannot be undone."
-            )
-            confirmed = st.checkbox(
-                "I understand this is irreversible", key=f"del_confirm_{selected_date}"
-            )
-            if st.button(
-                "🗑️ Delete entire schedule for this date",
-                type="primary",
-                disabled=not confirmed,
-                key=f"del_btn_{selected_date}",
-            ):
-                with get_session() as session:
-                    deleted = ScheduleRepository.delete_all_by_date(session, selected_date)
-                st.success(f"✅ Deleted {deleted} assignment(s) for {selected_date}.")
-                st.rerun()
 
         st.markdown("---")
 
@@ -94,7 +78,7 @@ class SchedulePage:
         # ── Filters ───────────────────────────────────────────────────────────
         st.markdown("### 🔍 Filters")
         all_statuses = sorted({a.status for a in assignments})
-        all_techs = sorted({a.technician_matricule for a in assignments})
+        all_techs = sorted({a.technician_name for a in assignments})
 
         col1, col2 = st.columns(2)
         with col1:
@@ -106,7 +90,7 @@ class SchedulePage:
         if status_filter:
             filtered = [a for a in filtered if a.status in status_filter]
         if tech_filter:
-            filtered = [a for a in filtered if a.technician_matricule in tech_filter]
+            filtered = [a for a in filtered if a.technician_name in tech_filter]
 
         # ── Orders list ───────────────────────────────────────────────────────
         st.markdown(f"### 📋 Orders ({len(filtered)} shown)")
@@ -116,7 +100,7 @@ class SchedulePage:
             for a in filtered:
                 label = (
                     f"{'🔴' if a.status == 'Blocked' else '🟡' if a.status == 'In Progress' else '🟢' if a.status == 'Completed' else '⚪'} "
-                    f"Order {a.erp_order_id} — {a.sap_number} | {a.technician_matricule}"
+                    f"Order {a.erp_order_id} — {a.sap_number} | {a.technician_name}"
                 )
                 with st.expander(label, expanded=False):
                     SchedulePage._render_order_card(a)
@@ -125,6 +109,88 @@ class SchedulePage:
         st.markdown("---")
         SchedulePage._render_unscheduled(unscheduled, selected_date)
 
+    # ── Delete section ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _render_delete_section(selected_date, assignment_count: int):
+        st.markdown("### 🗑️ Delete Options")
+
+        # ── Option A: delete assignments only (re-schedule without re-uploading) ──
+        if assignment_count > 0:
+            with st.expander(
+                f"🗑️ Delete assignments for {selected_date} ({assignment_count} record(s))",
+                expanded=False,
+            ):
+                st.warning(
+                    f"Removes all **{assignment_count} assignment(s)** for **{selected_date}** "
+                    "(including In Progress / Completed). The production orders remain in the DB "
+                    "so you can re-generate the schedule without re-uploading the file."
+                )
+                confirmed_a = st.checkbox(
+                    "I understand this is irreversible", key=f"del_a_confirm_{selected_date}"
+                )
+                if st.button(
+                    "🗑️ Delete assignments for this date",
+                    type="primary",
+                    disabled=not confirmed_a,
+                    key=f"del_a_btn_{selected_date}",
+                ):
+                    with get_session() as session:
+                        deleted = ScheduleRepository.delete_all_by_date(session, selected_date)
+                    st.success(f"✅ Deleted {deleted} assignment(s) for {selected_date}.")
+                    st.rerun()
+
+        # ── Option B: delete orders + assignments (full re-import) ────────────
+        with st.expander(
+            f"📦 Delete orders + assignments for {selected_date} (re-import a corrected file)",
+            expanded=False,
+        ):
+            st.warning(
+                f"Removes **all assignments AND all production orders** for **{selected_date}**. "
+                "Use this when you imported the wrong orders file and want to start fresh. "
+                "After deleting, go to Initial Scheduling and upload the corrected file."
+            )
+            confirmed_b = st.checkbox(
+                "I understand this is irreversible", key=f"del_b_confirm_{selected_date}"
+            )
+            if st.button(
+                "📦 Delete orders + assignments for this date",
+                type="primary",
+                disabled=not confirmed_b,
+                key=f"del_b_btn_{selected_date}",
+            ):
+                with get_session() as session:
+                    deleted_a = ScheduleRepository.delete_all_by_date(session, selected_date)
+                    deleted_o = ProductionOrderRepository.delete_by_date(session, selected_date)
+                st.success(
+                    f"✅ Deleted {deleted_a} assignment(s) and {deleted_o} order(s) "
+                    f"for {selected_date}. You can now re-upload a corrected orders file."
+                )
+                st.rerun()
+
+        # ── Option C: global reset — delete ALL orders + assignments ─────────
+        with st.expander("☢️ Global reset — Delete ALL orders and assignments (all dates)", expanded=False):
+            st.error(
+                "**This deletes every assignment AND every production order across every date.** "
+                "The system will be completely empty. Use this to start fresh (e.g. for testing). "
+                "This cannot be undone."
+            )
+            confirmed_c = st.checkbox(
+                "I understand this will erase all orders and scheduling history",
+                key="del_all_confirm",
+            )
+            if st.button(
+                "☢️ Global reset — Delete everything",
+                type="primary",
+                disabled=not confirmed_c,
+                key="del_all_btn",
+            ):
+                with get_session() as session:
+                    deleted_a = ScheduleRepository.delete_all_assignments(session)
+                    deleted_o = ProductionOrderRepository.delete_all(session)
+                st.success(f"✅ Deleted {deleted_a} assignment(s) and {deleted_o} order(s) across all dates.")
+                st.rerun()
+
     # ── Technician reassignment ───────────────────────────────────────────────
 
     @staticmethod
@@ -132,7 +198,7 @@ class SchedulePage:
         st.markdown("**Reassign a Planned order to a different technician**")
 
         order_options = {
-            f"{a.erp_order_id} — {a.sap_number} (currently: {a.technician_matricule})": str(a.assignment_id)
+            f"{a.erp_order_id} — {a.sap_number} (currently: {a.technician_name})": str(a.assignment_id)
             for a in planned
         }
 
@@ -189,7 +255,8 @@ class SchedulePage:
         with col1:
             st.markdown(f"**Order ID:** {a.erp_order_id}")
             st.markdown(f"**SAP:** {a.sap_number}")
-            st.markdown(f"**Technician:** {a.technician_matricule}")
+            st.markdown(f"**Quantity:** {a.quantity}")
+            st.markdown(f"**Technician:** {a.technician_name} ({a.technician_matricule})")
             if a.remark:
                 st.caption(f"Remark: {a.remark}")
             if a.is_expertise_override:

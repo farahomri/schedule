@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace as _dataclass_replace
 from datetime import date as Date
 from typing import NamedTuple
 
@@ -36,12 +37,14 @@ class SchedulingService:
         locked_by_user_id: int,
     ) -> tuple[list[AssignmentDTO], list[ProductionOrderDTO]]:
         """
-        Run the three-phase algorithm against daily_pool.assignable_pool and
-        persist ScheduleAssignment rows. Returns (scheduled_dtos, unscheduled_dtos).
+        Additive scheduling: existing assignments are preserved. Only new
+        (unassigned) orders are passed to the algorithm. Each tech's capacity
+        is reduced by the time already committed to their Planned / In Progress
+        / Partially Completed assignments so new orders only fill the gap.
 
-        Raises RuntimeError if a concurrent session already holds the lock.
+        Raises RuntimeError if a concurrent session holds the lock.
         """
-        # ── Acquire lock ────────────────────────────────────────────────────
+        # ── Acquire lock ─────────────────────────────────────────────────────
         with get_session() as session:
             ScheduleLockRepository.cleanup_stale(session)
             acquired = ScheduleLockRepository.acquire(session, schedule_date, locked_by_user_id)
@@ -52,31 +55,52 @@ class SchedulingService:
             )
 
         try:
-            # ── Run algorithm (no DB session — pure in-memory) ───────────────
             working_techs = ShiftService.get_working_technicians(schedule_date)
             if not working_techs:
                 raise ValueError("No working technicians found for this date.")
 
-            algo_rows, unscheduled = SchedulingService._run_algorithm(
-                daily_pool.assignable_pool, working_techs
-            )
-
-            # ── Persist results ──────────────────────────────────────────────
+            # ── Additive: inspect what's already on the board ─────────────────
+            _COMMITTED = {'Planned', 'In Progress', 'Partially Completed'}
             with get_session() as session:
-                # Skip orders that already have an assignment for today
-                # (handles idempotent re-runs without violating the unique constraint)
-                already_assigned = {
-                    row[0]
-                    for row in session.query(ScheduleAssignment.production_order_id)
+                existing = (
+                    session.query(ScheduleAssignment)
                     .filter_by(schedule_date=schedule_date)
                     .all()
-                }
+                )
+                already_assigned_ids: set[int] = {a.production_order_id for a in existing}
+                consumed_time: dict[int, float] = {}
+                for a in existing:
+                    if a.status in _COMMITTED:
+                        consumed_time[a.technician_id] = (
+                            consumed_time.get(a.technician_id, 0.0)
+                            + float(a.remaining_time_minutes or 0)
+                        )
+                # Max sequence number per tech so new rows append, not overlap
+                max_seq: dict[int, int] = {}
+                for a in existing:
+                    if a.sequence_number and a.sequence_number > max_seq.get(a.technician_id, 0):
+                        max_seq[a.technician_id] = a.sequence_number
 
-                tech_seq: dict[int, int] = {}  # per-tech sequence counter
+            # Only new orders enter the algorithm
+            new_orders = [o for o in daily_pool.assignable_pool if o.id not in already_assigned_ids]
 
+            # Reduce each tech's capacity by what's already committed
+            adjusted_techs = [
+                _dataclass_replace(
+                    tech,
+                    working_time_minutes=max(
+                        0, int(tech.working_time_minutes - consumed_time.get(tech.technician_id, 0.0))
+                    ),
+                )
+                for tech in working_techs
+            ]
+
+            algo_rows, unscheduled = SchedulingService._run_algorithm(new_orders, adjusted_techs)
+
+            # ── Persist new assignments ───────────────────────────────────────
+            with get_session() as session:
+                tech_seq: dict[int, int] = dict(max_seq)  # start after existing rows
                 for row in algo_rows:
-                    if row.order.id in already_assigned:
-                        continue
                     tech_id = row.tech.technician_id
                     tech_seq[tech_id] = tech_seq.get(tech_id, 0) + 1
                     session.add(ScheduleAssignment(
@@ -123,23 +147,36 @@ class SchedulingService:
         orders: list[ProductionOrderDTO],
         techs: list[WorkingTechnicianDTO],
     ) -> tuple[list[_AlgoRow], list[ProductionOrderDTO]]:
+        """
+        Three-phase assignment. Time is never a gate — large orders are assigned
+        to the best available technician and carried across multiple shifts via
+        the in-progress carryover in resolve_pool. Load tracking still guides
+        which tech receives each order so work is spread evenly.
+        """
+        if not techs:
+            return [], list(orders)
+
         # Sort: priority ascending (Urgent=0 first), effective_time descending (longer first)
         sorted_orders = sorted(
             orders,
             key=lambda o: (_priority_key(o.priority), -(o.effective_time_minutes or 0)),
         )
 
-        # Per-tech capacity state
+        # Track load per tech for balancing (not for gating)
         tech_remaining: dict[int, float] = {t.technician_id: float(t.working_time_minutes) for t in techs}
         tech_assigned: dict[int, float] = {t.technician_id: 0.0 for t in techs}
 
         scheduled: list[_AlgoRow] = []
         scheduled_ids: set[int | None] = set()
 
-        def fits(tech_id: int, duration: float) -> bool:
-            return tech_remaining[tech_id] >= duration
-
         # ── Phase 1: Round-robin — one order per technician ───────────────
+        # Iterate techs by descending remaining capacity so that the freest
+        # techs are filled first. This is critical for additive runs: a second
+        # batch of orders should go to the 10 idle techs, not the 3 that
+        # already carry batch-1 orders.
+        techs_by_remaining = sorted(
+            techs, key=lambda t: tech_remaining[t.technician_id], reverse=True
+        )
         techs_done_p1: set[int] = set()
 
         for order in sorted_orders:
@@ -149,11 +186,10 @@ class SchedulingService:
                 continue
             duration = order.effective_time_minutes or 0.0
 
-            for tech in techs:
+            for tech in techs_by_remaining:
                 if tech.technician_id in techs_done_p1:
                     continue
-                expertise_ok = (order.class_code is None or tech.expertise_class >= order.class_code)
-                if expertise_ok and fits(tech.technician_id, duration):
+                if order.class_code is None or tech.expertise_class >= order.class_code:
                     scheduled.append(_AlgoRow(order, tech, False))
                     tech_remaining[tech.technician_id] -= duration
                     tech_assigned[tech.technician_id] += duration
@@ -161,7 +197,7 @@ class SchedulingService:
                     techs_done_p1.add(tech.technician_id)
                     break
 
-        # ── Phase 2: Balanced — remaining orders, expertise respected ─────
+        # ── Phase 2: Balanced — expertise respected, least-loaded first ──
         for order in sorted_orders:
             if order.id in scheduled_ids:
                 continue
@@ -169,13 +205,11 @@ class SchedulingService:
 
             candidates = [
                 t for t in techs
-                if (order.class_code is None or t.expertise_class >= order.class_code)
-                and fits(t.technician_id, duration)
+                if order.class_code is None or t.expertise_class >= order.class_code
             ]
             if not candidates:
                 continue
 
-            # Tiebreak: least assigned time → exact expertise match → most remaining time
             best = min(
                 candidates,
                 key=lambda t: (
@@ -189,18 +223,14 @@ class SchedulingService:
             tech_assigned[best.technician_id] += duration
             scheduled_ids.add(order.id)
 
-        # ── Phase 3: Capacity fill — expertise ignored ────────────────────
+        # ── Phase 3: Capacity fill — expertise ignored, any tech ─────────
         for order in sorted_orders:
             if order.id in scheduled_ids:
                 continue
             duration = order.effective_time_minutes or 0.0
 
-            candidates = [t for t in techs if fits(t.technician_id, duration)]
-            if not candidates:
-                continue
-
             best = min(
-                candidates,
+                techs,
                 key=lambda t: (tech_assigned[t.technician_id], -tech_remaining[t.technician_id]),
             )
             scheduled.append(_AlgoRow(order, best, True))
